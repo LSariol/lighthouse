@@ -29,24 +29,24 @@ func NewBuilder(dh *client.Client, cc *coveclient.Client, ctx context.Context) *
 
 func (b *Builder) Build(repo models.WatchedRepo) error {
 
-	fmt.Println("----Building " + repo.Name + " ----")
+	fmt.Println("----Building " + repo.ContainerName + " ----")
 
 	err := cleanUp()
 	if err != nil {
-		wError := "Cleaning Failed for " + repo.Name + " " + err.Error()
+		wError := "Cleaning Failed for " + repo.ContainerName + " " + err.Error()
 		fmt.Println(wError)
 		return fmt.Errorf("cleanup: %w", err)
 	}
 
 	// Prepare Repo for build
-	err = downloadNewCommit(repo.DownloadURL, repo.Name)
+	err = downloadNewCommit(repo.DownloadURL, repo.ContainerName)
 	if err != nil {
-		wError := "Download Failed for " + repo.Name + " " + err.Error()
+		wError := "Download Failed for " + repo.ContainerName + " " + err.Error()
 		fmt.Println(wError)
 		return fmt.Errorf("download: %w", err)
 	}
 
-	err = b.StopContainer(repo.Name)
+	err = b.StopContainer(repo.ContainerName)
 	if err != nil {
 		if strings.Contains(err.Error(), "No such container") {
 			// ignore and continue
@@ -57,21 +57,21 @@ func (b *Builder) Build(repo models.WatchedRepo) error {
 
 	}
 
-	err = unpackNewProject(repo.Name)
+	err = unpackNewProject(repo.ContainerName)
 	if err != nil {
-		wError := "Unzip Failed for " + repo.Name + " " + err.Error()
+		wError := "Unzip Failed for " + repo.ContainerName + " " + err.Error()
 		fmt.Println(wError)
 		return fmt.Errorf("unpack: %w", err)
 	}
 
-	err = b.createContainer(strings.ToLower(repo.Name))
+	err = b.createContainer(strings.ToLower(repo.ContainerName))
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
 
 	err = cleanUp()
 	if err != nil {
-		wError := "Cleaning Failed for " + repo.Name + " " + err.Error()
+		wError := "Cleaning Failed for " + repo.ContainerName + " " + err.Error()
 		fmt.Println(wError)
 		return fmt.Errorf("cleanup end: %w", err)
 	}
@@ -90,7 +90,7 @@ func (b *Builder) InitilizeContainers(watchList []models.WatchedRepo) error {
 
 	for _, model := range watchList {
 		// If container is running, good
-		containerName := strings.ToLower(model.Name)
+		containerName := strings.ToLower(model.ContainerName)
 		status, err := b.IsContainerRunning(containerName)
 		if err != nil {
 			return err

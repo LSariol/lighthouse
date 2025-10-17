@@ -10,23 +10,21 @@ import (
 	"github.com/LSariol/LightHouse/internal/models"
 )
 
-func (w *Watcher) AddNewRepo(name string, url string) error {
+func (w *Watcher) AddNewRepo(displayName string, url string) error {
 
-	name = strings.ToLower(name)
-
-	// Check if new repo is already being watched
-	exists, conflictVal, conflictType := w.repoExists(name, url)
+	// Check if new URL is already being watched
+	exists := w.repoExists(displayName, url)
 	if exists {
-		fmt.Printf("Conflict detected: %s is already in use as a %s\n", conflictVal, conflictType)
+		fmt.Printf("%s is already being watched.\n", url)
 		return nil
 	}
 
-	apiURL, downloadURL, err := getURLs(url)
+	rName, rAPIURL, rDownloadURL, err := parseURL(url)
 	if err != nil {
 		return err
 	}
 
-	newRepo := models.NewWatchedRepo(name, url, apiURL, downloadURL)
+	newRepo := models.NewWatchedRepo(displayName, rName, url, rAPIURL, rDownloadURL)
 
 	w.WatchList = append(w.WatchList, newRepo)
 
@@ -41,7 +39,7 @@ func (w *Watcher) RemoveRepo(toRemove string) error {
 	indexToRemove := -1
 
 	for index, existingRepo := range w.WatchList {
-		if existingRepo.Name == toRemove {
+		if existingRepo.DisplayName == toRemove {
 			indexToRemove = index
 			break
 		}
@@ -62,12 +60,12 @@ func (w *Watcher) ChangeRepoName(currentName string, name string) error {
 	updated := false
 
 	if w.checkNamingConflicts(name, currentName) {
-		return fmt.Errorf("This name is already being used to watch a different repo.")
+		return fmt.Errorf("this name is already being used to watch a different repo")
 	}
 
 	for i := range w.WatchList {
-		if w.WatchList[i].Name == currentName {
-			w.WatchList[i].Name = name
+		if w.WatchList[i].DisplayName == currentName {
+			w.WatchList[i].DisplayName = name
 			lastModified := time.Now()
 			w.WatchList[i].Stats.Meta.LastModifiedAt = &lastModified
 			updated = true
@@ -76,7 +74,7 @@ func (w *Watcher) ChangeRepoName(currentName string, name string) error {
 	}
 
 	if !updated {
-		return fmt.Errorf("changeRepoName: " + currentName + " does not exist.")
+		return fmt.Errorf("changeRepoName: %s does not exist", currentName)
 	}
 
 	w.storeWatchList()
@@ -84,17 +82,52 @@ func (w *Watcher) ChangeRepoName(currentName string, name string) error {
 	return nil
 }
 
-func (w *Watcher) ChangeRepoURL(name string, newURL string) error {
+func (w *Watcher) ChangeRepoURL(dName string, newURL string) error {
 	updated := false
 
-	if w.checkURLConflicts(name, newURL) {
-		return fmt.Errorf("This url is already being watched under a different name.")
+	if w.checkURLConflicts(dName, newURL) {
+		return fmt.Errorf("this url is already being watched under a different name")
 	}
 
 	for i := range w.WatchList {
-		if w.WatchList[i].Name == name {
+		if w.WatchList[i].DisplayName == dName {
 
-			apiURL, downloadURL, err := getURLs(newURL)
+			_, apiURL, downloadURL, err := parseURL(newURL)
+			if err != nil {
+				return fmt.Errorf("changeRepoURL: %w", err)
+			}
+
+			w.WatchList[i].URL = newURL
+			lastModified := time.Now()
+			w.WatchList[i].Stats.Meta.LastModifiedAt = &lastModified
+			w.WatchList[i].APIURL = apiURL
+			w.WatchList[i].DownloadURL = downloadURL
+			w.WatchList[i].DisplayName = dName
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		return fmt.Errorf("changeRepoURL: %s does not exist", dName)
+	}
+
+	w.storeWatchList()
+
+	return nil
+}
+
+func (w *Watcher) UpdateRepo(dName string, newURL string) error {
+	updated := false
+
+	if w.isRepoWatched(newURL) {
+		return fmt.Errorf("this url is already being watched")
+	}
+
+	for i := range w.WatchList {
+		if w.WatchList[i].DisplayName == dName {
+
+			_, apiURL, downloadURL, err := parseURL(newURL)
 			if err != nil {
 				return fmt.Errorf("changeRepoURL: %w", err)
 			}
@@ -110,7 +143,7 @@ func (w *Watcher) ChangeRepoURL(name string, newURL string) error {
 	}
 
 	if !updated {
-		return fmt.Errorf("changeRepoURL: " + name + " does not exist.")
+		return fmt.Errorf("changeRepoURL: %s does not exist", dName)
 	}
 
 	w.storeWatchList()
@@ -121,26 +154,25 @@ func (w *Watcher) ChangeRepoURL(name string, newURL string) error {
 //Helper Functions
 
 // Returns a boolean if repo exists
-func (w *Watcher) repoExists(newRepoName string, newRepoURL string) (bool, string, string) {
+func (w *Watcher) repoExists(displayName string, url string) bool {
 
 	for _, existingRepo := range w.WatchList {
-		if existingRepo.URL == newRepoURL {
-			return true, "URL", existingRepo.URL
+		if existingRepo.URL == url {
+			return true
 		}
-
-		if existingRepo.Name == newRepoName {
-			return true, "Name", existingRepo.Name
+		if existingRepo.DisplayName == displayName {
+			return true
 		}
 	}
 
-	return false, "", ""
+	return false
 
 }
 
 func (w *Watcher) checkNamingConflicts(name string, currentName string) bool {
 
 	for _, repo := range w.WatchList {
-		if repo.Name == name && repo.Name != currentName {
+		if repo.DisplayName == name && repo.DisplayName != currentName {
 			return true
 		}
 	}
@@ -151,7 +183,19 @@ func (w *Watcher) checkNamingConflicts(name string, currentName string) bool {
 func (w *Watcher) checkURLConflicts(name string, currentURL string) bool {
 
 	for _, repo := range w.WatchList {
-		if repo.URL == currentURL && repo.Name != name {
+		if repo.URL == currentURL && repo.DisplayName != name {
+			return true
+		}
+	}
+
+	return false
+}
+
+// checkWatchedReposConflicts verifies that the new url is not currently being watched.
+func (w *Watcher) isRepoWatched(currentURL string) bool {
+
+	for _, repo := range w.WatchList {
+		if repo.URL == currentURL {
 			return true
 		}
 	}
@@ -205,7 +249,7 @@ func (w *Watcher) DisplayWatchList() {
 	for _, repo := range w.WatchList {
 		fmt.Printf(
 			"%-20s | %-40s | %-20s | %-15d \n",
-			repo.Name,
+			repo.DisplayName,
 			repo.URL,
 			repo.Stats.Meta.StartedWatchingAt.Format("2006-01-02 15:04:05"),
 			repo.Stats.Queries.QueryCount,
@@ -213,14 +257,20 @@ func (w *Watcher) DisplayWatchList() {
 	}
 }
 
-func getURLs(url string) (string, string, error) {
+func parseURL(url string) (string, string, string, error) {
 
 	trim := strings.TrimPrefix(url, "https://github.com/")
 	parts := strings.Split(trim, "/")
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("Invalid Github repo URL: %s", url)
+		return "", "", "", fmt.Errorf("invalid Github repo URL: %s", url)
 	}
 
-	return "https://api.github.com/repos/" + parts[0] + "/" + parts[1], "https://github.com/" + parts[0] + "/" + parts[1] + "/archive/refs/heads/main.zip", nil
+	rOwner := parts[0]
+	rName := parts[1]
+
+	rAPIURL := "https://api.github.com/repos/" + rOwner + "/" + rName
+	rDownloadURL := "https://github.com/" + rOwner + "/" + rName + "/archive/refs/heads/main.zip"
+
+	return rName, rAPIURL, rDownloadURL, nil
 
 }

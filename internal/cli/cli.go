@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -56,7 +57,7 @@ func (c *CLI) parseCLI(args []string) {
 
 		if len(args) != 3 {
 			fmt.Println("add requires 3 total arguments.")
-			fmt.Println("add <repoName> <repoURL>")
+			fmt.Println("add <DisplayName> <repoURL>")
 			return
 		}
 
@@ -64,7 +65,7 @@ func (c *CLI) parseCLI(args []string) {
 		if err != nil {
 			fmt.Printf("Failed adding new repo: %w\n", err)
 		}
-		fmt.Println("Watching Repo")
+		log.Printf("%s is now being watched.\n", args[1])
 
 	case "remove", "r":
 
@@ -81,11 +82,18 @@ func (c *CLI) parseCLI(args []string) {
 
 	case "change", "c":
 
-		if len(args) != 4 {
-			fmt.Println("remove requires 4 total arguments.")
-			fmt.Println("change <name or url> <old> <new>")
+		if len(args) != 3 {
+			fmt.Println("remove requires 3 total arguments.")
+			fmt.Println("change <old repository name> <new repo URL>")
 			return
 		}
+
+		err := c.Watcher.UpdateRepo(args[1], args[2])
+		if err != nil {
+			fmt.Println("Failed to update Repository URL.")
+		}
+
+		fmt.Println("URL has been updated.")
 
 		if strings.ToLower(args[1]) == "name" {
 			err := c.Watcher.ChangeRepoName(args[2], args[3])
@@ -94,16 +102,6 @@ func (c *CLI) parseCLI(args []string) {
 			}
 
 			fmt.Println("Name has been changed.")
-			return
-		}
-
-		if strings.ToLower(args[1]) == "name" {
-			err := c.Watcher.ChangeRepoURL(args[2], args[3])
-			if err != nil {
-				fmt.Printf("Failed changing repo name for %s: %w\n", args[2], err)
-			}
-
-			fmt.Println("URL has been changed.")
 			return
 		}
 

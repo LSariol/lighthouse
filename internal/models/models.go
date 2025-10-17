@@ -3,11 +3,12 @@ package models
 import "time"
 
 type WatchedRepo struct {
-	Name        string    `json:"name"`
-	URL         string    `json:"url"`
-	APIURL      string    `json:"apiURL"`
-	DownloadURL string    `json:"downloadURL"`
-	Stats       RepoStats `json:"stats"`
+	DisplayName   string    `json:"displayName"`
+	ContainerName string    `json:"containerName"`
+	URL           string    `json:"url"`
+	APIURL        string    `json:"apiURL"`
+	DownloadURL   string    `json:"downloadURL"`
+	Stats         RepoStats `json:"stats"`
 }
 
 type RepoStats struct {
@@ -49,14 +50,15 @@ type DownloadStats struct {
 	DownloadTriggeredCount int        `json:"downloadTriggeredCount"`
 }
 
-func NewWatchedRepo(name string, url string, apiURL string, downloadURL string) WatchedRepo {
+func NewWatchedRepo(dName string, cName string, url string, apiURL string, downloadURL string) WatchedRepo {
 	now := time.Now()
 
 	return WatchedRepo{
-		Name:        name,
-		URL:         url,
-		APIURL:      apiURL,
-		DownloadURL: downloadURL,
+		DisplayName:   dName,
+		ContainerName: cName,
+		URL:           url,
+		APIURL:        apiURL,
+		DownloadURL:   downloadURL,
 		Stats: RepoStats{
 			Meta: MetaStats{
 				StartedWatchingAt: now,

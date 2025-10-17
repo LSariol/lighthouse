@@ -2,17 +2,15 @@ package builder
 
 import (
 	"archive/zip"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
-
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 )
 
 func downloadNewCommit(URL string, projectName string) error {
@@ -95,166 +93,59 @@ func unpackNewProject(projectName string) error {
 	return nil
 }
 
-func cleanUp() error {
-
-	// Clean Staging Folder
-	err := cleanupAll("STAGING_PATH")
-	if err != nil {
-		return fmt.Errorf("failed to clean staging area at %s: %w", os.Getenv("STAGING_PATH"), err)
-	}
-	err = os.MkdirAll(os.Getenv("STAGING_PATH")+"/Working", 0755)
-	if err != nil {
-		return fmt.Errorf("failed to recreate staging area at %s: %w", os.Getenv("STAGING_PATH"), err)
-	}
-
-	//Clean Download Folder
-	err = cleanupAll("DOWNLOAD_PATH")
-	if err != nil {
-		return fmt.Errorf("failed to clean download area at %s: %w", os.Getenv("DOWNLOAD_PATH"), err)
-	}
-	err = os.MkdirAll(os.Getenv("DOWNLOAD_PATH"), 0755)
-	if err != nil {
-		return fmt.Errorf("failed to recreate download area at %s: %w", os.Getenv("DOWNLOAD_PATH"), err)
-	}
-
-	return nil
-}
-
-func cleanupAll(base string) error {
-	base = os.Getenv(base)
-	if base == "" {
-		return fmt.Errorf("STAGING_PATH not set")
-	}
-
-	// Read all entries inside the staging path
-	entries, err := os.ReadDir(base)
-	if err != nil {
-		return fmt.Errorf("failed to read staging dir: %w", err)
-	}
-
-	for _, e := range entries {
-		p := filepath.Join(base, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			return fmt.Errorf("failed to remove %s: %w", p, err)
-		}
-	}
-
-	return nil
-}
-
 func (b *Builder) createContainer(projectName string) error {
+	projectDir := filepath.Join(os.Getenv("STAGING_PATH"), projectName+"-main")
+
+	required, err := findComposeVars(projectDir)
+	if err != nil {
+		return fmt.Errorf("discover compose vars: %w", err)
+	}
+
+	env := os.Environ()
+	for v := range required {
+		val, err := b.CC.GetSecret(v)
+		if err != nil {
+			return fmt.Errorf("missing value for %q: %w", v, err)
+		}
+
+		env = append(env, fmt.Sprintf("%s=%s", v, val))
+	}
 
 	cmd := exec.Command("docker", "compose", "up", "-d", "--build", "--remove-orphans")
-	cmd.Dir = os.Getenv("STAGING_PATH") + projectName + "-main" // <- relative paths in compose resolve here
+	cmd.Dir = projectDir
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-
-	if projectName == "cloudflared" {
-		token, err := b.CC.GetSecret("CLOUDFLARE_TUNNEL_TOKEN")
-		if err != nil {
-			return err
-		}
-
-		cmd.Env = append(os.Environ(), "TUNNEL_TOKEN="+token)
-	}
-
-	if projectName == "lighthousedb" {
-		pg_db, err := b.CC.GetSecret("PG_DB")
-		if err != nil {
-			return err
-		}
-
-		pg_user, err := b.CC.GetSecret("PG_USER")
-		if err != nil {
-			return err
-		}
-
-		pg_password, err := b.CC.GetSecret("PG_PASSWORD")
-		if err != nil {
-			return err
-		}
-		cmd.Env = append(os.Environ(), "POSTGRES_DB="+pg_db, "POSTGRES_USER="+pg_user, "POSTGRES_PASSWORD="+pg_password)
-	}
+	cmd.Env = env
 
 	return cmd.Run()
 }
 
-func (b *Builder) StartContainer(name string) error {
-	return b.Docker.ContainerStart(b.Ctx, name, container.StartOptions{})
-}
+func findComposeVars(dir string) (map[string]struct{}, error) {
 
-func (b *Builder) StopContainer(name string) error {
-	return b.Docker.ContainerStop(b.Ctx, name, container.StopOptions{})
-}
+	composeVarRx := regexp.MustCompile(`\$\{([^}:]+)(?::[^}]*)?\}`)
 
-func (b *Builder) RestartContainer(name string) error {
-	return b.Docker.ContainerRestart(b.Ctx, name, container.StopOptions{})
-}
+	cmd := exec.Command("docker", "compose", "config", "--no-interpolate")
+	cmd.Dir = dir
 
-func (b *Builder) GetAllContainers() ([]types.Container, error) {
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 
-	containers, err := b.Docker.ContainerList(b.Ctx, container.ListOptions{
-		All: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list containers: %w", err)
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("docker compose config failed: %v\n%s", err, out.String())
 	}
 
-	return containers, nil
-}
-
-func (b *Builder) GetRunningContainers() ([]types.Container, error) {
-
-	containers, err := b.Docker.ContainerList(b.Ctx, container.ListOptions{
-		All: false,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list containers: %w", err)
-	}
-
-	return containers, nil
-}
-
-func (b *Builder) IsContainerRunning(nameOrId string) (bool, error) {
-
-	info, err := b.Docker.ContainerInspect(b.Ctx, nameOrId)
-	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("inspect %q: %w", nameOrId, err)
-	}
-
-	if info.State == nil {
-		return false, fmt.Errorf("no state for %q", nameOrId)
-	}
-
-	return info.State.Running, nil
-}
-
-func (b *Builder) StartAllContainers() error {
-
-	for _, repo := range b.WatchList {
-		name := strings.ToLower(repo.Name)
-
-		err := b.StartContainer(name)
-		if err != nil {
-			return fmt.Errorf("starting all containers: %s: %w", name, err)
+	matches := composeVarRx.FindAllStringSubmatch(out.String(), -1)
+	vars := make(map[string]struct{}, len(matches))
+	for _, m := range matches {
+		// m[1] is the variable name before any default/required modifiers
+		name := m[1]
+		// Very light sanity filter: environment variable-ish
+		// (compose allows broader names technically, but most are A-Z0-9_)
+		// You can drop this if you want everything.
+		if name != "" {
+			vars[name] = struct{}{}
 		}
 	}
+	return vars, nil
 
-	return nil
-}
-
-func (b *Builder) StopAllContainers() error {
-
-	for _, repo := range b.WatchList {
-		name := strings.ToLower(repo.Name)
-
-		err := b.StopContainer(name)
-		if err != nil {
-			return fmt.Errorf("starting all containers: %s: %w", name, err)
-		}
-	}
-
-	return nil
 }
