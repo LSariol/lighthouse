@@ -8,7 +8,7 @@ import (
 
 	"github.com/LSariol/LightHouse/internal/builder"
 	"github.com/LSariol/LightHouse/internal/models"
-	"github.com/LSariol/coveclient"
+	"github.com/lsariol/coveclient"
 )
 
 type Watcher struct {

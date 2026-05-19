@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/LSariol/coveclient"
+	"github.com/lsariol/coveclient"
 )
 
 func (w *Watcher) loadGitCredentials() error {
@@ -25,7 +25,7 @@ func (w *Watcher) loadGitCredentials() error {
 func NewCoveClient() *coveclient.Client {
 
 	clientSecret := os.Getenv("COVE_CLIENT_SECRET")
-	var coveClient *coveclient.Client = coveclient.New(os.Getenv("COVE_ADDRESS"), clientSecret)
+	var coveClient *coveclient.Client = coveclient.New(os.Getenv("COVE_ADDRESS"), clientSecret, "lighthouse")
 
 	if clientSecret == "" {
 		clientSecret, err := coveClient.Bootstrap()

@@ -14,7 +14,7 @@ import (
 	"github.com/LSariol/LightHouse/internal/cli"
 	"github.com/LSariol/LightHouse/internal/config"
 	"github.com/LSariol/LightHouse/internal/watcher"
-	"github.com/LSariol/coveclient"
+	"github.com/lsariol/coveclient"
 	dockerclient "github.com/docker/docker/client"
 )
 

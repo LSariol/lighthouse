@@ -2,9 +2,9 @@ module github.com/LSariol/LightHouse
 
 go 1.25.1
 
-require github.com/LSariol/coveclient v0.1.1
-
 require github.com/joho/godotenv v1.5.1
+
+require github.com/lsariol/coveclient v0.2.0
 
 require (
 	github.com/Microsoft/go-winio v0.4.21 // indirect
