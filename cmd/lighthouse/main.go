@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,8 +13,8 @@ import (
 	"github.com/LSariol/LightHouse/internal/cli"
 	"github.com/LSariol/LightHouse/internal/config"
 	"github.com/LSariol/LightHouse/internal/watcher"
-	"github.com/lsariol/coveclient"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/lsariol/coveclient"
 )
 
 func main() {
@@ -28,7 +27,6 @@ func main() {
 
 	// Build Dependencies
 	var coveClient *coveclient.Client = watcher.NewCoveClient()
-	fmt.Println(coveClient.ClientSecret)
 
 	if err := config.SaveClientSecret(envPath, coveClient.ClientSecret); err != nil {
 		panic(err)
