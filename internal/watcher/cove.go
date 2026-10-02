@@ -1,17 +1,19 @@
 package watcher
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/lsariol/coveclient"
 )
 
 func (w *Watcher) loadGitCredentials() error {
 
-	fmt.Println("Getting GITHUB PAT")
+	fmt.Println("Getting Github token")
 
-	gitToken, err := w.CC.GetSecret("LIGHTHOUSE_GITHUB_PAT")
+	gitToken, err := w.CC.GetSecret("LIGHTHOUSE_GITHUB_TOKEN")
 	if err != nil {
 		fmt.Println(err)
 		return fmt.Errorf("loadGitCredentials: %v", err)
@@ -24,16 +26,24 @@ func (w *Watcher) loadGitCredentials() error {
 
 func NewCoveClient() *coveclient.Client {
 
-	clientSecret := os.Getenv("COVE_CLIENT_SECRET")
-	var coveClient *coveclient.Client = coveclient.New(os.Getenv("COVE_ADDRESS"), clientSecret, "lighthouse")
+	coveClient := coveclient.New(os.Getenv("COVE_ADDRESS"), "", "lighthouse")
 
-	if clientSecret == "" {
-		clientSecret, err := coveClient.Bootstrap()
-		if err != nil {
-			panic(err)
-		}
-		coveClient.ClientSecret = clientSecret
+	tokenPath := os.Getenv("COVE_TOKEN_PATH")
+	if tokenPath == "" {
+		panic("COVE_TOKEN_PATH is not set")
 	}
 
-	return coveClient
+	for {
+		_, err := coveClient.LoadOrBootstrap(tokenPath)
+		if err == nil {
+			return coveClient
+		}
+
+		if !errors.Is(err, coveclient.ErrBootstrapClosed) {
+			panic(err)
+		}
+
+		fmt.Println("Waiting for Cove token. Run 'bootstrap open lighthouse' in the Cove CLI. Retrying in 15s.")
+		time.Sleep(15 * time.Second)
+	}
 }

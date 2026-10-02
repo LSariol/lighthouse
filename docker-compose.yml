@@ -7,6 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: lighthouse
     environment:
+      - COVE_TOKEN_PATH=/app/vault/cove/token
       - COVE_ADDRESS=http://cove:2100
       - STAGING_PATH=/app/server/staging/
       - DOWNLOAD_PATH=/app/server/download/
@@ -15,6 +16,10 @@ services:
     ports:
       - "2000:2000"
     volumes:
+      - type: bind
+        source: /srv/server/storage/lighthouse/cove
+        target: /app/vault/cove
+        read_only: false
       - type: bind
         source: /srv/server/storage/lighthouse/.env
         target: /app/vault/.env

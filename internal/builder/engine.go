@@ -101,14 +101,19 @@ func (b *Builder) createContainer(projectName string) error {
 		return fmt.Errorf("discover compose vars: %w", err)
 	}
 
-	env := os.Environ()
+	keys := make([]string, 0, len(required))
 	for v := range required {
-		val, err := b.CC.GetSecret(v)
-		if err != nil {
-			return fmt.Errorf("missing value for %q: %w", v, err)
-		}
+		keys = append(keys, v)
+	}
 
-		env = append(env, fmt.Sprintf("%s=%s", v, val))
+	secrets, err := b.CC.GetSecrets(keys...)
+	if err != nil {
+		return fmt.Errorf("fetch secrets for %s: %w", projectName, err)
+	}
+
+	env := os.Environ()
+	for key, val := range secrets {
+		env = append(env, fmt.Sprintf("%s=%s", key, val))
 	}
 
 	cmd := exec.Command("docker", "compose", "up", "-d", "--build", "--remove-orphans")
