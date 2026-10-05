@@ -110,13 +110,22 @@ LightHouse exposes an interactive CLI on stdin (requires `tty: true` in Docker, 
 
 | Command | Description |
 |---------|-------------|
+| `list` | Print all watched repos and their stats |
+| `status` | Show running state (Running / Stopped) for each watched container |
 | `add <name> <github-url>` | Add a repo to the watchlist |
 | `remove <name>` | Remove a repo |
 | `change <name> <new-url>` | Update a repo's URL |
-| `list` | Print all watched repos and their stats |
+| `update url <name> <new-url>` | Update a repo's URL (explicit form) |
+| `update name <name> <new-name>` | Rename a watched repo |
 | `start <name\|ALL>` | Start a container (or all of them) |
 | `stop <name\|ALL>` | Stop a container (or all of them) |
+| `restart <name\|ALL>` | Restart a container (or all of them) |
+| `rebuild <name\|ALL>` | Force a full repull and rebuild regardless of commit SHA |
+| `logs <name> [lines]` | Print last N lines of container logs (default 50) |
 | `scan` | Manually trigger one scan cycle immediately |
+| `pause` | Pause the automatic scan loop |
+| `resume` | Resume the automatic scan loop |
+| `help` / `h` | Show available commands |
 | `exit [all]` | Shut down LightHouse; `exit all` stops all containers first |
 
 ---
