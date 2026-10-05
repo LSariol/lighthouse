@@ -26,7 +26,7 @@ func (w *Watcher) loadGitCredentials() error {
 
 func NewCoveClient() *coveclient.Client {
 
-	coveClient := coveclient.New(os.Getenv("COVE_ADDRESS"), "", "lighthouse")
+	coveClient := coveclient.New(os.Getenv("COVE_ADDRESS"), "")
 
 	tokenPath := os.Getenv("COVE_TOKEN_PATH")
 	if tokenPath == "" {
