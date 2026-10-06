@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/compose"
-	"github.com/LSariol/LightHouse/internal/docker"
+	"github.com/lsariol/lighthouse/internal/compose"
+	"github.com/lsariol/lighthouse/internal/docker"
 )
 
 // verify waits until every service of the project is up:

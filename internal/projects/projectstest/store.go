@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/projects"
 )
 
 // Store is an in-memory projects.Store. The zero value is ready to use.

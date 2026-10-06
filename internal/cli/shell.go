@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/control"
+	"github.com/lsariol/lighthouse/internal/control"
 	"golang.org/x/term"
 )
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/github"
 )
 
 // Project is one watched repository and what Lighthouse knows about it.

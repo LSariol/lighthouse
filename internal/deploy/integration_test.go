@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/compose"
-	"github.com/LSariol/LightHouse/internal/docker"
-	"github.com/LSariol/LightHouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/compose"
+	"github.com/lsariol/lighthouse/internal/docker"
+	"github.com/lsariol/lighthouse/internal/projects"
 )
 
 // TestRealDeployAndRollback deploys a small project with the real docker

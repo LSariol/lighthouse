@@ -87,8 +87,8 @@ You'll need a Linux server with Docker and Docker Compose, a Postgres server for
    ```
 2. **On the server**, create the folders Lighthouse keeps its state in (see [DOCUMENTATION.md §10](DOCUMENTATION.md#10-deploying-lighthouse) for the exact commands), then start it:
    ```bash
-   git clone https://github.com/LSariol/LightHouse.git
-   cd LightHouse
+   git clone https://github.com/lsariol/lighthouse.git
+   cd lighthouse
    docker compose up -d --build
    ```
 3. **Open the control prompt** and add your first project:

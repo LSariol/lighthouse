@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/config"
-	"github.com/LSariol/LightHouse/internal/control"
-	"github.com/LSariol/LightHouse/internal/deploy"
-	"github.com/LSariol/LightHouse/internal/docker"
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/orchestrator"
-	"github.com/LSariol/LightHouse/internal/projects"
-	"github.com/LSariol/LightHouse/internal/projects/projectstest"
+	"github.com/lsariol/lighthouse/internal/config"
+	"github.com/lsariol/lighthouse/internal/control"
+	"github.com/lsariol/lighthouse/internal/deploy"
+	"github.com/lsariol/lighthouse/internal/docker"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/orchestrator"
+	"github.com/lsariol/lighthouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/projects/projectstest"
 )
 
 // fakeContainers holds containers per compose project and records actions.

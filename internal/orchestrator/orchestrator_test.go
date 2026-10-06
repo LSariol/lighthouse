@@ -7,10 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/LSariol/LightHouse/internal/deploy"
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/projects"
-	"github.com/LSariol/LightHouse/internal/projects/projectstest"
+	"github.com/lsariol/lighthouse/internal/deploy"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/projects/projectstest"
 )
 
 // fakeCommits answers with a commit per repository name; others fail.

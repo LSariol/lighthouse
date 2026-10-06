@@ -1,4 +1,4 @@
-module github.com/LSariol/LightHouse
+module github.com/lsariol/lighthouse
 
 go 1.27.1
 

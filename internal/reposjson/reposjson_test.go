@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LSariol/LightHouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/github"
 )
 
 // A file as the pre-1.0 Lighthouse wrote it.

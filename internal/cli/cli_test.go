@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/control"
+	"github.com/lsariol/lighthouse/internal/control"
 )
 
 // fakeService is a control.Service with fixed projects that records calls.

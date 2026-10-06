@@ -8,11 +8,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/projects"
-	"github.com/LSariol/LightHouse/internal/projects/projectstest"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/projects/projectstest"
 )
 
 // The integration tests run against a real, disposable Postgres set up with

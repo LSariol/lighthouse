@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/compose"
+	"github.com/lsariol/lighthouse/internal/compose"
 )
 
 // These tests need a Docker daemon; without one they're skipped. They create

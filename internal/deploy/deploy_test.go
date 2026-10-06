@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/compose"
-	"github.com/LSariol/LightHouse/internal/docker"
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/projects"
 	"github.com/lsariol/coveclient"
+	"github.com/lsariol/lighthouse/internal/compose"
+	"github.com/lsariol/lighthouse/internal/docker"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/projects"
 )
 
 const (

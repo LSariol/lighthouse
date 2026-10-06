@@ -478,7 +478,7 @@ docker network inspect spark >/dev/null 2>&1 || docker network create spark
 #   bootstrap open lighthouse
 # The database and its URL keys: §10.1.
 
-git clone https://github.com/LSariol/LightHouse.git && cd LightHouse
+git clone https://github.com/lsariol/lighthouse.git && cd lighthouse
 docker compose up -d --build
 docker logs -f lighthouse     # success: "migration applied" (first start only), then "Lighthouse ready"
 docker exec lighthouse /lighthouse status   # success: "✓ Everything is healthy." (or the list of what isn't)
@@ -487,7 +487,7 @@ docker exec lighthouse /lighthouse status   # success: "✓ Everything is health
 **Updating:**
 
 ```bash
-cd ~/LightHouse && git pull && docker compose up -d --build
+cd ~/lighthouse && git pull && docker compose up -d --build
 ```
 
 State lives in the database and the bind mounts, so rebuilding is safe. A deploy that has already swapped when Lighthouse stops finishes its check first (up to 2 minutes); one still building is cancelled, which changes nothing running.

@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/deploy"
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/deploy"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/projects"
 )
 
 // Deployer deploys a project. *deploy.Deployer implements it.

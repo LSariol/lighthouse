@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/projects"
 )
 
 // RunStoreTests runs the behaviour every projects.Store must have. open

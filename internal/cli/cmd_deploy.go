@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/control"
+	"github.com/lsariol/lighthouse/internal/control"
 )
 
 func (c *CLI) deploy(ctx context.Context, args []string) error {

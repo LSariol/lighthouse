@@ -8,8 +8,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/github"
-	"github.com/LSariol/LightHouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/projects"
 )
 
 // entry is one project as repos.json stored it. Fields the old Lighthouse
