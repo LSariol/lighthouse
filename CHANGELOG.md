@@ -32,7 +32,7 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 ### Added
 - **Safe deploys.** Build first, swap last: the running version keeps serving while the new one is downloaded, built and given its secrets; `docker compose up` is the only downtime; then every service must come up healthy (or stay up), and if one doesn't, the previous version is put back automatically.
 - **Broken projects.** A commit that fails 3 times for a reason retrying can't fix (it doesn't build, a secret is missing, it doesn't start) isn't tried again until a new commit arrives or `retry <name>`. Problems with GitHub, Cove or the network are just retried.
-- **Compose projects with several services.** The compose project's name comes from the compose file; its containers are found by Compose's labels. `start`, `stop`, `restart` and `logs` take `<name>` or `<name>:<service>`; `status` shows each service. `remove --down` removes a project's containers.
+- **Compose projects with several services.** The compose project's name comes from the compose file; its containers are found by Compose's labels. `start`, `stop`, `restart` and `logs` take `<name>` or `<name>:<service>`; `status` shows each service. `remove` also stops and removes a project's containers; `--keep` leaves them running.
 - `report <name> [n]`: one deploy step by step, with each step's output (secret values hidden). `history` shows the step a deploy failed at.
 - Private repositories: the exact commit is downloaded through the GitHub API.
 - Each deploy cleans up after itself: old deploy folders, old rollback images, unused images, week-old build cache.

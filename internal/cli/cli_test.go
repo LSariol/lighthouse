@@ -355,13 +355,22 @@ func TestEmbeddedExit(t *testing.T) {
 	}
 }
 
-func TestRemoveDown(t *testing.T) {
+// remove takes the containers down unless --keep.
+func TestRemove(t *testing.T) {
 	svc := newFake("plop")
-	if _, _, err := run(t, svc, "remove plop --down --yes"); err != nil {
+	if _, _, err := run(t, svc, "remove plop --yes"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(svc.calls, ",") != "remove --down plop" {
-		t.Errorf("calls = %v", svc.calls)
+		t.Errorf("remove: calls = %v", svc.calls)
+	}
+
+	svc = newFake("plop")
+	if _, _, err := run(t, svc, "remove plop --keep --yes"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(svc.calls, ",") != "remove plop" {
+		t.Errorf("remove --keep: calls = %v", svc.calls)
 	}
 }
 

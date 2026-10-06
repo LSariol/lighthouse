@@ -52,28 +52,30 @@ func (c *CLI) add(ctx context.Context, args []string) error {
 
 func (c *CLI) remove(ctx context.Context, args []string) error {
 	skip, rest := takeYesFlag(args[1:])
-	down, rest := takeFlag(rest, "--down")
+	keep, rest := takeFlag(rest, "--keep")
 	if len(rest) != 1 {
-		return usageError{form: "remove <name> [--down] [--yes]"}
+		return usageError{form: "remove <name> [--keep] [--yes]"}
 	}
 	name := rest[0]
 
-	question := fmt.Sprintf("Stop watching %q? Its containers keep running.", name)
-	if down {
-		question = fmt.Sprintf("Stop watching %q, and stop and remove its containers?", name)
+	// A project Lighthouse no longer watches would run on untracked, so its
+	// containers go too unless --keep says otherwise.
+	question := fmt.Sprintf("Stop watching %q, and stop and remove its containers?", name)
+	if keep {
+		question = fmt.Sprintf("Stop watching %q? Its containers keep running.", name)
 	}
 	ok, err := c.confirmOrRefuse(question, skip, "remove")
 	if !ok || err != nil {
 		return err
 	}
 
-	if err := c.svc.Remove(ctx, name, down); err != nil {
+	if err := c.svc.Remove(ctx, name, !keep); err != nil {
 		return err
 	}
-	if down {
-		success(fmt.Sprintf("Removed %s and its containers.", name))
+	if keep {
+		success(fmt.Sprintf("Stopped watching %s. Its containers keep running, untracked.", name))
 	} else {
-		success(fmt.Sprintf("Stopped watching %s. Its containers keep running; \"remove %s --down\" would have removed them.", name, name))
+		success(fmt.Sprintf("Removed %s and its containers.", name))
 	}
 	return nil
 }

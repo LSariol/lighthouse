@@ -86,7 +86,7 @@ On the server. `lh` below stands for `docker exec -it lighthouse /lighthouse`; a
 | Open the prompt | `lh shell` (`exit` or Ctrl-D leaves; Lighthouse keeps running) |
 | Is everything healthy? | `lh status` (exits non-zero if something needs attention) |
 | Watch a new repo | `lh add <name> https://github.com/<owner>/<repo>` |
-| Stop watching | `lh remove <name>` (containers keep running), or `lh remove <name> --down` (removes them too) |
+| Stop watching | `lh remove <name>` (also removes its containers), or `lh remove <name> --keep` (leaves them running) |
 | See what's watched | `lh list` |
 | Deploy now | `lh deploy <name>` (or `deploy all`) |
 | How did its deploys go? | `lh history <name>` |
@@ -434,7 +434,7 @@ Lighthouse's CLI follows the server's CLI conventions (clig.dev; modelled on Cov
 |---|---|---|
 | `list`, `ls`, `l` | `list` | Every project: repository, deployed commit, last deploy, last check; its last error, and whether it's broken |
 | `add` | `add <name> <url>` | Names: letters, digits, `-`, `_`, up to 64. The URL may have `www.`, a trailing `/` or `.git`. Deployed on the next check |
-| `remove`, `rm` | `remove <name> [--down] [--yes]` | Asks first. Without `--down` its containers keep running; with it, `docker compose down` removes them |
+| `remove`, `rm` | `remove <name> [--keep] [--yes]` | Asks first. Stops watching it and removes its containers and networks (`docker compose down`); its data and images stay. `--keep` leaves the containers running, untracked |
 | `rename` | `rename <name> <new-name>` | Lighthouse's name only; repository and containers unchanged |
 | `set-url` | `set-url <name> <url>` | Watch another repository under the same name |
 | `deploy`, `rebuild` | `deploy <name\|all> [--yes]` | Deploy the latest commit now, even if deployed or broken, and wait. `all` asks first |
@@ -614,7 +614,7 @@ A new password is generated straight into its URL on the server, and `setup.sql`
 
 ### Removing a project
 
-`lh remove <name> --down` stops watching it and removes its containers. Without `--down` its containers keep running, untracked.
+`lh remove <name>` stops watching it and removes its containers and networks (`docker compose down`); its data under `/srv/server/storage` and its images stay. `lh remove <name> --keep` leaves the containers running, untracked.
 
 ### A deploy failed
 
@@ -874,7 +874,7 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 
 #### B13. Names mean different things in different commands
 **Medium.** `models.WatchedRepo.ContainerName` is really the **GitHub repo name** from the URL.
-**Status: fixed** in step 3: nickname, repository and compose project are separate; containers are found by Compose's labels; `<name>:<service>` addresses one service; `remove --down` removes the containers.
+**Status: fixed** in step 3: nickname, repository and compose project are separate; containers are found by Compose's labels; `<name>:<service>` addresses one service; `remove` removes the containers (`--keep` leaves them).
 - `start`, `stop`, `restart` and `logs` take a raw **container name**, so `stop sparkdb` or `stop cove` works on unmanaged infrastructure.
 - `rebuild` takes a **display name** (case-insensitive); `remove` takes a display name (case-sensitive).
 - `status` and `stop all` use `lower(repo name)`.
@@ -1262,7 +1262,7 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
 3. **Pipeline — done** (2026-10-06):
    - Build first, swap last, verify, roll back ([§4.3](#43-the-deploy-pipeline-deploydeployerdeploy)); per-step output with secrets hidden; cleanup of folders, tags, images and cache.
    - Failure classification and the broken state (3 permanent failures of one commit); `retry`, `report`.
-   - Compose projects and multiple services ([16.9](#169-compose-projects-and-services-decided-2026-10-06)); `name:service`; `remove --down`.
+   - Compose projects and multiple services ([16.9](#169-compose-projects-and-services-decided-2026-10-06)); `name:service`; `remove` takes the containers down (`--keep` leaves them).
    - Migration `00003`; the `compose` package; tests against real Compose and Docker, including a real rollback.
    - Fixed along the way: B1, B6–B10, B13, B18, B19, S7; partly B11.
    - Moved to later steps: the health URL setting and the secret prefix (step 4), the test stage and image scan (step 4), approval and backups for infrastructure projects (step 5).
@@ -1293,7 +1293,7 @@ A project's nickname, its repository, its compose project and its containers are
 | Compose project | **The compose file's `name:`**, read at every deploy and stored; the lowercased repo name if there is none. Lighthouse always runs `docker compose -p <it>` | `website` |
 | Services | Found through Compose's labels (`com.docker.compose.project` / `.service`), never guessed from names | `web`, `www`, `bot` |
 
-**Commands:** `start`, `stop`, `restart`, `logs` and `status` take `<project>` (every service) or `<project>:<service>` (one), e.g. `logs personalWebsite:bot`; Tab completes the services. `status` shows one line per service. `remove` asks whether to stop and remove the project's containers too (`--down` does it without asking).
+**Commands:** `start`, `stop`, `restart`, `logs` and `status` take `<project>` (every service) or `<project>:<service>` (one), e.g. `logs personalWebsite:bot`; Tab completes the services. `status` shows one line per service. `remove` stops and removes the project's containers too (`--keep` leaves them running).
 
 **Rules that come with it:**
 - **A compose project belongs to one Lighthouse project.** A deploy that would take over another project's compose project is refused, naming the other project.

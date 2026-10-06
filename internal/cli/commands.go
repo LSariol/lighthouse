@@ -117,16 +117,16 @@ func commandTable(embedded bool) []command {
 			synopsis: "<name>",
 			summary:  "Stop watching a project",
 			usages: []usage{
-				{"remove <name>", "Stop watching a project. Asks first. Its containers keep running."},
-				{"remove <name> --down", "Also stop and remove its containers (docker compose down)."},
+				{"remove <name>", "Stop watching a project, and stop and remove its containers (docker compose down). Asks first. Its data and images stay."},
+				{"remove <name> --keep", "Stop watching it, but leave its containers running, untracked."},
 			},
 			flags: []flag{
-				{"--down", "Stop and remove its containers too."},
+				{"--keep", "Leave its containers running."},
 				yes,
 			},
 			examples: []example{
-				{"remove plop", "asks first; plop keeps running"},
-				{"remove plop --down --yes", "gone, no question"},
+				{"remove plop", "asks first; plop goes offline"},
+				{"remove plop --keep --yes", "stop watching, keep it running"},
 			},
 			run:      (*CLI).remove,
 			complete: names,
