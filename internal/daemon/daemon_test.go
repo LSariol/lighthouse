@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+
+	cerrdefs "github.com/containerd/errdefs"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 // fakeContainers records container actions.
 type fakeContainers struct {
 	actions []string
+	missing bool // every container is missing
 }
 
 func (f *fakeContainers) Start(ctx context.Context, name string) error {
@@ -24,6 +27,9 @@ func (f *fakeContainers) Start(ctx context.Context, name string) error {
 	return nil
 }
 func (f *fakeContainers) Stop(ctx context.Context, name string) error {
+	if f.missing {
+		return cerrdefs.ErrNotFound
+	}
 	f.actions = append(f.actions, "stop "+name)
 	return nil
 }
@@ -160,5 +166,25 @@ func TestHistory(t *testing.T) {
 	h, err := d.History(ctx, "PLOP", 10)
 	if err != nil || len(h) != 1 || h[0].Commit != "abc" || h[0].Error != "build failed" || h[0].Trigger != "manual" {
 		t.Errorf("History = %+v, %v", h, err)
+	}
+}
+
+// A project whose compose file names its containers differently (here: repo
+// "landing", containers "web", "www", "bot") gets an explanation, not the
+// advice to deploy it.
+func TestMissingContainerExplained(t *testing.T) {
+	d, c, _ := newDaemon(t)
+	c.missing = true
+	ctx := context.Background()
+	d.Add(ctx, "personalWebsite", "https://github.com/lsariol/landing")
+
+	err := d.Stop(ctx, "personalWebsite")
+	if kind(err) != control.KindNotFound {
+		t.Fatalf("Stop = %v, want not_found", err)
+	}
+	for _, want := range []string{`"landing"`, "deploy personalWebsite", "names its containers differently", "docker compose"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message lacks %q: %v", want, err)
+		}
 	}
 }

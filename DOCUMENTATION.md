@@ -313,6 +313,8 @@ What a repository must look like for Lighthouse to deploy it. `lighthouse help s
 2. **Deployable code on `main`.** The archive is always `refs/heads/main`, while the change check reads the repo's **default** branch. If those differ, Lighthouse watches one branch and deploys another.
 3. **`name:` at the top of the compose file, equal to the lowercase repo name.** Without it, Compose names the project after the staging folder (`<repo>-main`). Compose then can't recognise its own containers on the next deploy, and a fixed `container_name` collides.
 4. **One main container named exactly like the repo, lowercased** (`container_name: cove` for repo `Cove`). Lighthouse stops, starts, checks and reads the logs of the container with that name, and no other. `add` prints the name it expects.
+
+   *Rules 3 and 4 go away in step 3* ([16.9](#169-compose-projects-and-services-decided-2026-10-06)): the compose project comes from the file's own `name:`, and every service in it is found and controlled by Compose's labels, so a project may have any number of containers with any names.
 5. **Join the external `spark` network** to reach Cove, sparkdb or each other (`sparkdb:5432`, `cove:2100`).
 6. **Every `${KEY}` exists in Cove under exactly that name**, following the naming standard `PROJECT_PLATFORM[_ROLE]_TYPE` ([§14.2](#142-secrets-cove)). Plain settings are written as values, never `${...}`.
 7. **Persistent data uses absolute host paths** (`/srv/server/storage/<project>/...:/app/data`) or named volumes. **Relative bind mounts (`./data:/data`) don't work:** Compose runs inside Lighthouse's container and resolves `./data` to `/app/server/staging/<repo>-main/data`, a path that doesn't exist on the host, so Docker creates an empty folder there ([B7](#b7-relative-bind-mounts-point-at-the-wrong-place)).
@@ -832,7 +834,9 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 - Projects with more than one service (app + worker + redis) only have their one same-named container stopped, started or checked.
 - `remove` leaves the container running.
 
-**Fix:** one identifier per project, equal to the compose project name; lifecycle through `docker compose -p <project> stop|start|restart|logs|ps`, or Docker filtered by the `com.docker.compose.project` label; refuse names that aren't managed projects.
+**Fix (decided 2026-10-06, in step 3):** keep the nickname, the repository and the compose project apart; the compose project comes from the compose file's `name:`; containers are found by Compose's labels, and `name:service` addresses one service. Details: [16.9](#169-compose-projects-and-services-decided-2026-10-06).
+
+Seen in practice: `lsariol/landing` (compose project `website`, services `web`, `www`, `bot`) deploys, but `stop`, `start`, `restart`, `logs` and `status` look for a container named `landing` and find none.
 
 #### B14. CLI correctness
 **Low–Medium.** `internal/cli/cli.go`, `internal/watcher/watchlist.go`.
@@ -870,6 +874,10 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 #### B20. Code quality
 **Low.** `gofmt` reports `internal/builder/builder.go` and `internal/watcher/watcher.go`. There's dead code (see [§17](#17-housekeeping)), mixed `fmt.Println`/`log`, no timestamps on most lines, a leftover debug line (`GOT TOKEN`), a missing newline in `ERROR IN SCAN: %v`, and no tests.
 **Status: fixed.** gofmt-clean, dead code removed, `log/slog` everywhere, tests for every package except the builder (rewritten in step 3), CI on every push.
+
+#### B21. Service names can collide on the `spark` network
+**Medium** (a live risk, not a Lighthouse bug). Docker's DNS on a shared network answers to every service name and container name on it. If two projects both have a service called `web` and both join `spark`, `http://web:3000` reaches either one, at random. cloudflared routes by name, so a public site could intermittently serve another project.
+**Fix:** a contract rule: anything on `spark` has a name unique on the server (a `container_name`, or a network alias such as `landing-web`); and the step-4 checks refuse a deploy whose names clash with another project's.
 
 ### Security issues
 
@@ -1183,7 +1191,7 @@ The layout from the foundation ([§3](#3-architecture)) is the v1.0.0 layout; th
 
 | Step | Adds |
 |---|---|
-| 3. Pipeline | `deployments`: `image`, `previous_image`, `rolled_back` status; `deployment_steps` (`deployment_id`, `step`, `status`, times, scrubbed `log_tail`); `projects.health_url` |
+| 3. Pipeline | `projects`: `compose_project` (from the compose file's `name:`, unique; existing rows filled with the lowercased repo name), `secret_prefix`, `health_url`; `deployments`: `image`, `previous_image`, `rolled_back` status; `deployment_steps` (`deployment_id`, `step`, `status`, times, scrubbed `log_tail`) |
 | 4. Checks | `projects`: `scan_policy`, `policy_exceptions text[]`, `secret_exceptions text[]` (keys outside `<PROJECT>_*`/`SHARED_*`), `step_timeouts` |
 | 5. Orchestrator | `projects`: `mode` (`branch`/`release`), `branch`, `include_prereleases`, `tier` (`normal`/`infra`), `requires_approval`, `desired_state`, `paused`, `deployed_version`, `last_seen_sha`/`_version`, `etag`, `health`, `failure_count`, `failing_version`, `broken`, `next_attempt_at`; `deployments`: `version`, `failure_kind`, more triggers (`retry`, `rollback`, `reconcile`, `self_update`) and statuses (`awaiting_approval`, …) |
 
@@ -1204,7 +1212,8 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
    - Fixed along the way: B15, B16.
 3. **Pipeline:**
    - Prepare, swap and verify (16.3), with rollback.
-   - Failure classification, startup (F10).
+   - Failure classification.
+   - Compose projects and multiple services ([16.9](#169-compose-projects-and-services-decided-2026-10-06)).
 4. **Checks:**
    - Contract and policy, naming and existence, gitleaks.
    - Test stage, Trivy.
@@ -1218,6 +1227,28 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
    - Rollout-plan entries: Admin SQL, Cove keys and tokens, compose changes on the server, `import`, the fixed IP on `spark`.
    - **Revisit S1:** decide whether Cove v1.1.0 (delegated reads, `--from` tokens) is worth doing before or after tagging.
    - Merge, tag `v1.0.0`.
+
+### 16.9 Compose projects and services (decided 2026-10-06)
+
+A project's nickname, its repository, its compose project and its containers are four different things, and only the first two are chosen in Lighthouse.
+
+| Name | Comes from | Example (`add personalWebsite github.com/lsariol/landing`) |
+|---|---|---|
+| Nickname | `add <name>`; `rename` changes only this | `personalWebsite` |
+| Repository | `add … <url>`, `set-url` | `lsariol/landing` |
+| Compose project | **The compose file's `name:`**, read at every deploy and stored; the lowercased repo name if there is none. Lighthouse always runs `docker compose -p <it>` | `website` |
+| Services | Found through Compose's labels (`com.docker.compose.project` / `.service`), never guessed from names | `web`, `www`, `bot` |
+
+**Commands:** `start`, `stop`, `restart`, `logs` and `status` take `<project>` (every service) or `<project>:<service>` (one), e.g. `logs personalWebsite:bot`; Tab completes the services. `status` shows one line per service. `remove` asks whether to stop and remove the project's containers too (`--down` does it without asking).
+
+**Rules that come with it:**
+- **A compose project belongs to one Lighthouse project.** A deploy that would take over another project's compose project is refused, naming the other project.
+- **Healthy** means every service with a `restart:` policy is running; a service without one (a one-off job such as migrations) may have exited cleanly.
+- **The secret prefix** (for the step-4 rule that a project only gets its own keys) is stored per project, defaulting from the nickname (`PERSONALWEBSITE_`) and changeable, since existing Cove keys may use another name.
+- **Unique names on `spark`** ([B21](#b21-service-names-can-collide-on-the-spark-network)).
+- History stays per project (a deploy covers every service); rollback image tags are per service (`website-bot:<commit>`).
+
+**Migration:** a new migration adds `compose_project` and `secret_prefix` to `projects`; existing rows get the lowercased repo name (today's rule), so nothing changes until a project's next deploy reads its real `name:`.
 
 ---
 

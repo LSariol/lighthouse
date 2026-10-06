@@ -348,7 +348,7 @@ func (d *Daemon) containerAction(ctx context.Context, name string, verb string, 
 
 	if err := fn(ctx, p.Container()); err != nil {
 		if docker.IsNotFound(err) {
-			return control.Errorf(control.KindNotFound, "%s has no container named %q yet. \"deploy %s\" creates it.", p.Name, p.Container(), p.Name)
+			return control.Errorf(control.KindNotFound, "%s", missingContainer(p))
 		}
 		return control.Errorf(control.KindInternal, "Couldn't %s %s: %v", verb, p.Name, err)
 	}
@@ -367,9 +367,18 @@ func (d *Daemon) Logs(ctx context.Context, name string, lines int) (string, erro
 	logs, err := d.containers.Logs(ctx, p.Container(), lines)
 	if err != nil {
 		if docker.IsNotFound(err) {
-			return "", control.Errorf(control.KindNotFound, "%s has no container yet. \"deploy %s\" creates it.", p.Name, p.Name)
+			return "", control.Errorf(control.KindNotFound, "%s", missingContainer(p))
 		}
 		return "", fmt.Errorf("logs for %s: %w", p.Name, err)
 	}
 	return logs, nil
+}
+
+// missingContainer explains why a project's container wasn't found. Until
+// compose projects are read from the compose file (DOCUMENTATION.md 16.9),
+// Lighthouse looks for one container named after the repository.
+func missingContainer(p projects.Project) string {
+	return fmt.Sprintf("There's no container named %q (%s's repository name, which is where Lighthouse looks for now). "+
+		"Either %s hasn't been deployed yet (\"deploy %s\"), or its compose file names its containers differently or has several, "+
+		"which Lighthouse doesn't handle yet: use docker compose on the server for those.", p.Container(), p.Name, p.Name, p.Name)
 }
