@@ -2,245 +2,226 @@ package watcher
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/LSariol/LightHouse/internal/models"
 )
 
-func (w *Watcher) AddNewRepo(displayName string, url string) error {
+var (
+	ErrNotFound    = errors.New("no such project")
+	ErrNameTaken   = errors.New("name already in use")
+	ErrURLWatched  = errors.New("repository already watched")
+	ErrInvalidName = errors.New("invalid project name")
+	ErrInvalidURL  = errors.New("invalid GitHub URL")
+)
 
-	// Check if new URL is already being watched
-	exists := w.repoExists(displayName, url)
-	if exists {
-		fmt.Printf("%s is already being watched.\n", url)
-		return nil
-	}
+// validName is what a project name may look like: it's typed in the CLI and
+// matched without regard to case.
+var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
-	rName, rAPIURL, rDownloadURL, err := parseURL(url)
+// Load reads the watchlist file.
+func (w *Watcher) Load() error {
+	data, err := os.ReadFile(w.repoPath)
 	if err != nil {
 		return err
 	}
 
-	newRepo := models.NewWatchedRepo(displayName, rName, url, rAPIURL, rDownloadURL)
-
-	w.WatchList = append(w.WatchList, newRepo)
-
-	w.storeWatchList()
-
-	return nil
-
-}
-
-func (w *Watcher) RemoveRepo(toRemove string) error {
-
-	indexToRemove := -1
-
-	for index, existingRepo := range w.WatchList {
-		if existingRepo.DisplayName == toRemove {
-			indexToRemove = index
-			break
-		}
+	var list []models.WatchedRepo
+	if err := json.Unmarshal(data, &list); err != nil {
+		return fmt.Errorf("%s isn't a valid watchlist: %v", w.repoPath, err)
 	}
 
-	if indexToRemove != -1 {
-		w.WatchList = append(w.WatchList[:indexToRemove], w.WatchList[indexToRemove+1:]...)
-		fmt.Printf("%s has been removed from the watchlist.\n", toRemove)
-		w.storeWatchList()
-		return nil
-	}
-
-	return fmt.Errorf("unable to remove %s from watchlist", toRemove)
-
-}
-
-func (w *Watcher) ChangeRepoName(currentName string, name string) error {
-	updated := false
-
-	if w.checkNamingConflicts(name, currentName) {
-		return fmt.Errorf("this name is already being used to watch a different repo")
-	}
-
-	for i := range w.WatchList {
-		if w.WatchList[i].DisplayName == currentName {
-			w.WatchList[i].DisplayName = name
-			lastModified := time.Now()
-			w.WatchList[i].Stats.Meta.LastModifiedAt = &lastModified
-			updated = true
-			break
-		}
-	}
-
-	if !updated {
-		return fmt.Errorf("changeRepoName: %s does not exist", currentName)
-	}
-
-	w.storeWatchList()
-
+	w.mu.Lock()
+	w.watchList = list
+	w.mu.Unlock()
 	return nil
 }
 
-func (w *Watcher) UpdateRepo(dName string, newURL string) error {
-	updated := false
-
-	if w.isRepoWatched(newURL) {
-		return fmt.Errorf("this url is already being watched")
+// store writes the watchlist file.
+func (w *Watcher) store() error {
+	w.mu.Lock()
+	data, err := json.MarshalIndent(w.watchList, "", "\t")
+	w.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("save watchlist: %w", err)
 	}
 
-	for i := range w.WatchList {
-		if w.WatchList[i].DisplayName == dName {
-
-			_, apiURL, downloadURL, err := parseURL(newURL)
-			if err != nil {
-				return fmt.Errorf("changeRepoURL: %w", err)
-			}
-
-			w.WatchList[i].URL = newURL
-			lastModified := time.Now()
-			w.WatchList[i].Stats.Meta.LastModifiedAt = &lastModified
-			w.WatchList[i].APIURL = apiURL
-			w.WatchList[i].DownloadURL = downloadURL
-			updated = true
-			break
-		}
+	if err := os.WriteFile(w.repoPath, data, 0644); err != nil {
+		return fmt.Errorf("save watchlist: %w", err)
 	}
-
-	if !updated {
-		return fmt.Errorf("changeRepoURL: %s does not exist", dName)
-	}
-
-	w.storeWatchList()
-
 	return nil
 }
 
-// FindRepo returns the WatchedRepo with the given display name and true if found.
-func (w *Watcher) FindRepo(name string) (models.WatchedRepo, bool) {
-	for _, repo := range w.WatchList {
-		if strings.EqualFold(repo.DisplayName, name) {
-			return repo, true
-		}
+// Repos returns a copy of the watchlist.
+func (w *Watcher) Repos() []models.WatchedRepo {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]models.WatchedRepo(nil), w.watchList...)
+}
+
+// Find returns the project called name (not case-sensitive).
+func (w *Watcher) Find(name string) (models.WatchedRepo, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if i := w.index(name); i >= 0 {
+		return w.watchList[i], true
 	}
 	return models.WatchedRepo{}, false
 }
 
-//Helper Functions
-
-// Returns a boolean if repo exists
-func (w *Watcher) repoExists(displayName string, url string) bool {
-
-	for _, existingRepo := range w.WatchList {
-		if existingRepo.URL == url {
-			return true
-		}
-		if existingRepo.DisplayName == displayName {
-			return true
+// index returns the position of the project called name, or -1. w.mu must
+// be held.
+func (w *Watcher) index(name string) int {
+	for i, repo := range w.watchList {
+		if strings.EqualFold(repo.DisplayName, name) {
+			return i
 		}
 	}
-
-	return false
-
+	return -1
 }
 
-func (w *Watcher) checkNamingConflicts(name string, currentName string) bool {
-
-	for _, repo := range w.WatchList {
-		if repo.DisplayName == name && repo.DisplayName != currentName {
-			return true
-		}
+// Add starts watching the repository at url under name.
+func (w *Watcher) Add(name string, url string) (models.WatchedRepo, error) {
+	if !validName.MatchString(name) {
+		return models.WatchedRepo{}, ErrInvalidName
 	}
-
-	return false
-}
-
-// checkWatchedReposConflicts verifies that the new url is not currently being watched.
-func (w *Watcher) isRepoWatched(currentURL string) bool {
-
-	for _, repo := range w.WatchList {
-		if repo.URL == currentURL {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (w *Watcher) loadWatchList() error {
-	var watchList []models.WatchedRepo
-
-	//read json file
-	data, err := os.ReadFile(os.Getenv("APP_REPO_PATH"))
+	gh, err := ParseRepoURL(url)
 	if err != nil {
-		fmt.Println("Watcher - LoadWatchList: Failed to load repos.json")
-		return fmt.Errorf("loadWatchList: %w", err)
+		return models.WatchedRepo{}, err
 	}
 
-	//Unmarshal repos.json into watchList
-	err = json.Unmarshal([]byte(data), &watchList)
-	if err != nil {
-		fmt.Println("Watcher - LoadWatchList: Failed to Unmarshal json into WatchedRepos.")
-		return fmt.Errorf("loadWatchList: %w", err)
+	w.mu.Lock()
+	if w.index(name) >= 0 {
+		w.mu.Unlock()
+		return models.WatchedRepo{}, ErrNameTaken
 	}
+	if w.watchedBy(gh.URL()) != "" {
+		w.mu.Unlock()
+		return models.WatchedRepo{}, ErrURLWatched
+	}
+	repo := models.NewWatchedRepo(name, gh.Repo, gh.URL(), gh.APIURL(), gh.DownloadURL())
+	w.watchList = append(w.watchList, repo)
+	w.mu.Unlock()
 
-	w.WatchList = watchList
-	w.Builder.WatchList = watchList
-	return nil
+	return repo, w.store()
 }
 
-func (w *Watcher) storeWatchList() {
-
-	updatedData, err := json.MarshalIndent(w.WatchList, "", "	")
-	if err != nil {
-		fmt.Println("Watcher - storeWatchList: Failed to Marhsal json into UpdatedData.")
-		return
+// Remove stops watching the project called name.
+func (w *Watcher) Remove(name string) error {
+	w.mu.Lock()
+	i := w.index(name)
+	if i < 0 {
+		w.mu.Unlock()
+		return ErrNotFound
 	}
+	w.watchList = append(w.watchList[:i], w.watchList[i+1:]...)
+	w.mu.Unlock()
 
-	err = os.WriteFile(os.Getenv("APP_REPO_PATH"), updatedData, 0644)
-	if err != nil {
-		fmt.Println("Watcher - storeWatchList: Failed to write to repos.json." + err.Error())
-		return
-	}
+	return w.store()
 }
 
-// Display WatchList in a nice format
-func (w *Watcher) DisplayWatchList() {
+// Rename changes a project's name.
+func (w *Watcher) Rename(name string, newName string) error {
+	if !validName.MatchString(newName) {
+		return ErrInvalidName
+	}
 
-	fmt.Printf("%-20s | %-40s | %-20s | %-20s | %-10s\n",
-		"Name", "URL", "Started Watching", "Last Updated", "Queries")
-	fmt.Println(strings.Repeat("-", 20) + "-+-" + strings.Repeat("-", 40) + "-+-" +
-		strings.Repeat("-", 20) + "-+-" + strings.Repeat("-", 20) + "-+-" + strings.Repeat("-", 10))
+	w.mu.Lock()
+	i := w.index(name)
+	if i < 0 {
+		w.mu.Unlock()
+		return ErrNotFound
+	}
+	if j := w.index(newName); j >= 0 && j != i {
+		w.mu.Unlock()
+		return ErrNameTaken
+	}
+	w.watchList[i].DisplayName = newName
+	touch(&w.watchList[i])
+	w.mu.Unlock()
 
-	for _, repo := range w.WatchList {
-		lastUpdated := "Never"
-		if repo.Stats.Updates.LastUpdatedAt != nil {
-			lastUpdated = repo.Stats.Updates.LastUpdatedAt.Format("2006-01-02 15:04")
+	return w.store()
+}
+
+// SetURL points a project at another repository. Its container and folder
+// names follow the new repository's name.
+func (w *Watcher) SetURL(name string, url string) error {
+	gh, err := ParseRepoURL(url)
+	if err != nil {
+		return err
+	}
+
+	w.mu.Lock()
+	i := w.index(name)
+	if i < 0 {
+		w.mu.Unlock()
+		return ErrNotFound
+	}
+	if other := w.watchedBy(gh.URL()); other != "" && !strings.EqualFold(other, name) {
+		w.mu.Unlock()
+		return ErrURLWatched
+	}
+	r := &w.watchList[i]
+	r.URL, r.APIURL, r.DownloadURL, r.ContainerName = gh.URL(), gh.APIURL(), gh.DownloadURL(), gh.Repo
+	touch(r)
+	w.mu.Unlock()
+
+	return w.store()
+}
+
+// watchedBy returns the name of the project watching url, or "". w.mu must
+// be held.
+func (w *Watcher) watchedBy(url string) string {
+	for _, repo := range w.watchList {
+		if strings.EqualFold(repo.URL, url) {
+			return repo.DisplayName
 		}
-		fmt.Printf("%-20s | %-40s | %-20s | %-20s | %-10d\n",
-			repo.DisplayName,
-			repo.URL,
-			repo.Stats.Meta.StartedWatchingAt.Format("2006-01-02 15:04"),
-			lastUpdated,
-			repo.Stats.Queries.QueryCount,
-		)
 	}
+	return ""
 }
 
-func parseURL(url string) (string, string, string, error) {
+func touch(r *models.WatchedRepo) {
+	now := time.Now()
+	r.Stats.Meta.LastModifiedAt = &now
+}
 
-	trim := strings.TrimPrefix(url, "https://github.com/")
-	parts := strings.Split(trim, "/")
-	if len(parts) != 2 {
-		return "", "", "", fmt.Errorf("invalid Github repo URL: %s", url)
+// GitHubRepo is a repository on GitHub.
+type GitHubRepo struct {
+	Owner string
+	Repo  string
+}
+
+func (g GitHubRepo) URL() string    { return "https://github.com/" + g.Owner + "/" + g.Repo }
+func (g GitHubRepo) APIURL() string { return "https://api.github.com/repos/" + g.Owner + "/" + g.Repo }
+func (g GitHubRepo) DownloadURL() string {
+	return g.URL() + "/archive/refs/heads/main.zip"
+}
+
+var repoPart = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// ParseRepoURL accepts a GitHub repository URL in its common forms:
+// https://github.com/owner/repo, with or without "www.", a trailing slash or
+// ".git", or http://.
+func ParseRepoURL(raw string) (GitHubRepo, error) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+	if !strings.HasPrefix(strings.ToLower(s), "github.com/") {
+		return GitHubRepo{}, ErrInvalidURL
 	}
+	s = s[len("github.com/"):]
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
 
-	rOwner := parts[0]
-	rName := parts[1]
-
-	rAPIURL := "https://api.github.com/repos/" + rOwner + "/" + rName
-	rDownloadURL := "https://github.com/" + rOwner + "/" + rName + "/archive/refs/heads/main.zip"
-
-	return rName, rAPIURL, rDownloadURL, nil
-
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 || !repoPart.MatchString(parts[0]) || !repoPart.MatchString(parts[1]) {
+		return GitHubRepo{}, ErrInvalidURL
+	}
+	return GitHubRepo{Owner: parts[0], Repo: parts[1]}, nil
 }

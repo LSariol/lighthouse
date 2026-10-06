@@ -1,80 +1,81 @@
+// Package builder deploys a project: download, unpack, resolve secrets from
+// Cove, docker compose up. It also starts, stops and inspects containers.
 package builder
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/LSariol/LightHouse/internal/models"
-	"github.com/moby/moby/client"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/lsariol/coveclient"
+	"github.com/moby/moby/client"
 )
 
 type Builder struct {
-	Docker    *client.Client
-	CC        *coveclient.Client
-	Ctx       context.Context
-	WatchList []models.WatchedRepo
+	docker       *client.Client
+	cove         *coveclient.Client
+	stagingPath  string
+	downloadPath string
+
+	// deploying allows one deploy at a time: every deploy empties the same
+	// staging and download folders.
+	deploying sync.Mutex
 }
 
-func NewBuilder(dh *client.Client, cc *coveclient.Client, ctx context.Context) *Builder {
+func New(docker *client.Client, cove *coveclient.Client, stagingPath, downloadPath string) *Builder {
 	return &Builder{
-		Docker: dh,
-		CC:     cc,
-		Ctx:    ctx,
+		docker:       docker,
+		cove:         cove,
+		stagingPath:  stagingPath,
+		downloadPath: downloadPath,
 	}
 }
 
-func (b *Builder) Build(repo models.WatchedRepo) error {
+// ContainerName is the container Lighthouse manages for a project: the
+// lowercased repository name (the project's compose file must use it).
+func ContainerName(repo models.WatchedRepo) string {
+	return strings.ToLower(repo.ContainerName)
+}
 
-	fmt.Println("----Building " + repo.ContainerName + " ----")
+// Build deploys repo's main branch. Deploys run one at a time; a second call
+// waits for the first to finish.
+func (b *Builder) Build(ctx context.Context, repo models.WatchedRepo) error {
+	b.deploying.Lock()
+	defer b.deploying.Unlock()
 
-	err := cleanUp()
-	if err != nil {
-		wError := "Cleaning Failed for " + repo.ContainerName + " " + err.Error()
-		fmt.Println(wError)
-		return fmt.Errorf("cleanup: %w", err)
+	log := slog.With("project", repo.DisplayName)
+	log.Info("deploy started")
+
+	if err := b.cleanUp(); err != nil {
+		return fmt.Errorf("clean up: %w", err)
 	}
 
-	// Prepare Repo for build
-	err = downloadNewCommit(repo.DownloadURL, repo.ContainerName)
-	if err != nil {
-		wError := "Download Failed for " + repo.ContainerName + " " + err.Error()
-		fmt.Println(wError)
+	if err := b.downloadNewCommit(repo.DownloadURL, repo.ContainerName); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 
-	err = b.StopContainer(repo.ContainerName)
-	if err != nil {
-		if strings.Contains(err.Error(), "No such container") {
-			// ignore and continue
-		} else {
-			// propagate other errors
-			return fmt.Errorf("build failed to stop container: %w", err)
-		}
-
+	// The running container is stopped before the new one is built. A failed
+	// build leaves the project down; fixing that order is the v1.0.0 pipeline.
+	if err := b.StopContainer(ctx, ContainerName(repo)); err != nil && !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("stop container: %w", err)
 	}
 
-	err = unpackNewProject(repo.ContainerName)
-	if err != nil {
-		wError := "Unzip Failed for " + repo.ContainerName + " " + err.Error()
-		fmt.Println(wError)
+	if err := b.unpackNewProject(repo.ContainerName); err != nil {
 		return fmt.Errorf("unpack: %w", err)
 	}
 
-	err = b.createContainer(strings.ToLower(repo.ContainerName))
-	if err != nil {
-		return fmt.Errorf("create container: %w", err)
+	if err := b.createContainer(ContainerName(repo)); err != nil {
+		return fmt.Errorf("docker compose: %w", err)
 	}
 
-	err = cleanUp()
-	if err != nil {
-		wError := "Cleaning Failed for " + repo.ContainerName + " " + err.Error()
-		fmt.Println(wError)
-		return fmt.Errorf("cleanup end: %w", err)
+	if err := b.cleanUp(); err != nil {
+		return fmt.Errorf("clean up after deploy: %w", err)
 	}
 
-	fmt.Println("Clean Complete")
-
+	log.Info("deploy finished")
 	return nil
 }

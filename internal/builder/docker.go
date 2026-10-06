@@ -2,51 +2,51 @@ package builder
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/client"
 )
 
-func (b *Builder) StartContainer(name string) error {
-	_, err := b.Docker.ContainerStart(b.Ctx, name, client.ContainerStartOptions{})
+func (b *Builder) StartContainer(ctx context.Context, name string) error {
+	_, err := b.docker.ContainerStart(ctx, name, client.ContainerStartOptions{})
 	return err
 }
 
-func (b *Builder) StopContainer(name string) error {
-	_, err := b.Docker.ContainerStop(b.Ctx, name, client.ContainerStopOptions{})
+func (b *Builder) StopContainer(ctx context.Context, name string) error {
+	_, err := b.docker.ContainerStop(ctx, name, client.ContainerStopOptions{})
 	return err
 }
 
-func (b *Builder) RestartContainer(name string) error {
-	_, err := b.Docker.ContainerRestart(b.Ctx, name, client.ContainerRestartOptions{})
+func (b *Builder) RestartContainer(ctx context.Context, name string) error {
+	_, err := b.docker.ContainerRestart(ctx, name, client.ContainerRestartOptions{})
 	return err
 }
 
-func (b *Builder) IsContainerRunning(nameOrId string) (bool, error) {
-
-	result, err := b.Docker.ContainerInspect(b.Ctx, nameOrId, client.ContainerInspectOptions{})
+// ContainerState is a container's state as Docker reports it ("running",
+// "exited", ...), or "missing" when there's no such container.
+func (b *Builder) ContainerState(ctx context.Context, name string) (string, error) {
+	result, err := b.docker.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
+	if cerrdefs.IsNotFound(err) {
+		return "missing", nil
+	}
 	if err != nil {
-		if cerrdefs.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("inspect %q: %w", nameOrId, err)
+		return "", fmt.Errorf("inspect %q: %w", name, err)
 	}
-
-	info := result.Container
-	if info.State == nil {
-		return false, fmt.Errorf("no state for %q", nameOrId)
+	if result.Container.State == nil {
+		return "", fmt.Errorf("inspect %q: Docker reported no state", name)
 	}
-
-	return info.State.Running, nil
+	return string(result.Container.State.Status), nil
 }
 
-func (b *Builder) GetContainerLogs(name string, tail int) (string, error) {
-	rc, err := b.Docker.ContainerLogs(b.Ctx, name, client.ContainerLogsOptions{
+// ContainerLogs returns the last tail lines of a container's output, stdout
+// and stderr combined.
+func (b *Builder) ContainerLogs(ctx context.Context, name string, tail int) (string, error) {
+	rc, err := b.docker.ContainerLogs(ctx, name, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Tail:       strconv.Itoa(tail),
@@ -56,42 +56,14 @@ func (b *Builder) GetContainerLogs(name string, tail int) (string, error) {
 	}
 	defer rc.Close()
 
-	var stdout, stderr bytes.Buffer
-	if _, err := stdcopy.StdCopy(&stdout, &stderr, rc); err != nil && err != io.EOF {
+	var output bytes.Buffer
+	if _, err := stdcopy.StdCopy(&output, &output, rc); err != nil && err != io.EOF {
 		return "", fmt.Errorf("logs %q: read: %w", name, err)
 	}
-
-	combined := stdout.String()
-	if s := stderr.String(); s != "" {
-		combined += s
-	}
-	return combined, nil
+	return output.String(), nil
 }
 
-func (b *Builder) StartAllContainers() error {
-
-	for _, repo := range b.WatchList {
-		name := strings.ToLower(repo.ContainerName)
-
-		err := b.StartContainer(name)
-		if err != nil {
-			return fmt.Errorf("starting all containers: %s: %w", name, err)
-		}
-	}
-
-	return nil
-}
-
-func (b *Builder) StopAllContainers() error {
-
-	for _, repo := range b.WatchList {
-		name := strings.ToLower(repo.ContainerName)
-
-		err := b.StopContainer(name)
-		if err != nil {
-			return fmt.Errorf("starting all containers: %s: %w", name, err)
-		}
-	}
-
-	return nil
+// IsNotFound reports whether err means Docker has no such container.
+func IsNotFound(err error) bool {
+	return cerrdefs.IsNotFound(err)
 }

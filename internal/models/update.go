@@ -47,3 +47,11 @@ func UpdateBuildStats(repo WatchedRepo, buildStatus string) WatchedRepo {
 
 	return repo
 }
+
+// ClearErrorStats forgets the last error, after a check that succeeded.
+func ClearErrorStats(repo WatchedRepo) WatchedRepo {
+	repo.Stats.Queries.LastErrorAt = nil
+	repo.Stats.Queries.LastErrorMessage = nil
+
+	return repo
+}

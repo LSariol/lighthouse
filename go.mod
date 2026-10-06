@@ -8,6 +8,7 @@ require (
 	github.com/lsariol/coveclient v1.0.0
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.1
+	golang.org/x/term v0.46.0
 )
 
 require (

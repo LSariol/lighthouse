@@ -1,44 +1,45 @@
 package watcher
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 )
 
-func (w *Watcher) getLatestSHA(URL string, PAT string) (string, error) {
+// latestSHA returns the newest commit on the repository's default branch.
+func latestSHA(ctx context.Context, hc *http.Client, apiURL string, token string) (string, error) {
+	if token == "" {
+		return "", errors.New("no GitHub token yet (Lighthouse is still waiting for Cove)")
+	}
 
-	req, err := http.NewRequest("GET", URL+"/commits", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+"/commits?per_page=1", nil)
 	if err != nil {
 		return "", err
 	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
 
-	req.Header.Set("Authorization", "token "+PAT)
-	// req.Header.Set("Accept", "application/vdn.github+json")
-
-	resp, err := w.HTTP.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("GitHub: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("GitHub API Error: %s", resp.Status)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub: %s", resp.Status)
 	}
 
-	body, err := io.ReadAll(resp.Body)
-
-	if err != nil {
-		return "", err
+	var commits []struct {
+		SHA string `json:"sha"`
 	}
-
-	var commits []map[string]interface{}
-	err = json.Unmarshal(body, &commits)
-	if err != nil {
-		log.Fatal("Failed to unmarshal:", err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&commits); err != nil {
+		return "", fmt.Errorf("GitHub: unexpected response: %v", err)
 	}
-	shaHash := commits[0]["sha"].(string)
-	return shaHash, nil
+	if len(commits) == 0 || commits[0].SHA == "" {
+		return "", errors.New("GitHub: the repository has no commits")
+	}
+	return commits[0].SHA, nil
 }

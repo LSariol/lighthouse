@@ -13,9 +13,7 @@ import (
 	"strings"
 )
 
-func downloadNewCommit(URL string, projectName string) error {
-
-	fmt.Println("Downloading " + projectName)
+func (b *Builder) downloadNewCommit(URL string, projectName string) error {
 
 	resp, err := http.Get(URL)
 	if err != nil {
@@ -23,12 +21,12 @@ func downloadNewCommit(URL string, projectName string) error {
 	}
 	defer resp.Body.Close()
 
-	err = os.MkdirAll(filepath.Join(os.Getenv("DOWNLOAD_PATH")), 0755)
+	err = os.MkdirAll(b.downloadPath, 0755)
 	if err != nil {
 		return err
 	}
 
-	out, err := os.Create(filepath.Join(os.Getenv("DOWNLOAD_PATH"), projectName+".zip"))
+	out, err := os.Create(filepath.Join(b.downloadPath, projectName+".zip"))
 	if err != nil {
 		return err
 	}
@@ -42,19 +40,19 @@ func downloadNewCommit(URL string, projectName string) error {
 	return nil
 }
 
-func unpackNewProject(projectName string) error {
+func (b *Builder) unpackNewProject(projectName string) error {
 
-	r, err := zip.OpenReader(filepath.Join(os.Getenv("DOWNLOAD_PATH"), projectName+".zip"))
+	r, err := zip.OpenReader(filepath.Join(b.downloadPath, projectName+".zip"))
 	if err != nil {
 		return err
 	}
 	defer r.Close()
 
 	for _, file := range r.File {
-		filePath := filepath.Join(os.Getenv("STAGING_PATH"), file.Name)
+		filePath := filepath.Join(b.stagingPath, file.Name)
 
 		// Check for zip slip (Check for malicious files)
-		if !strings.HasPrefix(filePath, filepath.Clean(os.Getenv("STAGING_PATH"))+string(os.PathSeparator)) {
+		if !strings.HasPrefix(filePath, filepath.Clean(b.stagingPath)+string(os.PathSeparator)) {
 			return os.ErrPermission
 		}
 
@@ -94,7 +92,7 @@ func unpackNewProject(projectName string) error {
 }
 
 func (b *Builder) createContainer(projectName string) error {
-	projectDir := filepath.Join(os.Getenv("STAGING_PATH"), projectName+"-main")
+	projectDir := filepath.Join(b.stagingPath, projectName+"-main")
 
 	required, err := findComposeVars(projectDir)
 	if err != nil {
@@ -106,7 +104,7 @@ func (b *Builder) createContainer(projectName string) error {
 		keys = append(keys, v)
 	}
 
-	secrets, err := b.CC.GetSecrets(keys...)
+	secrets, err := b.cove.GetSecrets(keys...)
 	if err != nil {
 		return fmt.Errorf("fetch secrets for %s: %w", projectName, err)
 	}

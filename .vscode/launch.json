@@ -2,16 +2,24 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Launch Lighthouse",
+      "name": "Lighthouse: serve",
       "type": "go",
       "request": "launch",
       "mode": "auto",
-      "program": "${workspaceFolder}/cmd/lighthouse/main.go",  // your main package
-      "cwd": "${workspaceFolder}",                          // 👈 force working dir = repo root
-      "console": "externalTerminal",   // 👈 use terminal for stdin/stdout
-      "env": {
-        "ENVIRONMENT": "dev"
-      }
+      "program": "${workspaceFolder}/cmd/lighthouse",
+      "args": ["serve"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Lighthouse: shell",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/lighthouse",
+      "args": ["shell"],
+      "cwd": "${workspaceFolder}",
+      "console": "externalTerminal"
     }
   ]
 }
