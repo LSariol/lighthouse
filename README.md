@@ -90,7 +90,11 @@ You'll need a Linux server with Docker and Docker Compose, a running [Cove](http
    cd LightHouse
    docker compose up -d --build
    ```
-3. **Open the control prompt** with `docker attach lighthouse` and add your first project. To leave the prompt without stopping Lighthouse, press **Ctrl-P** then **Ctrl-Q**.
+3. **Open the control prompt** and add your first project:
+   ```bash
+   docker exec -it lighthouse /lighthouse shell
+   ```
+   Type `help` to see everything it can do, and `exit` to leave (Lighthouse keeps running). Single commands work too: `docker exec lighthouse /lighthouse status`.
 
 On its first start Lighthouse picks up its Cove access automatically. After that it just runs, and it comes back after a reboot.
 
@@ -98,14 +102,14 @@ On its first start Lighthouse picks up its Cove access automatically. After that
 
 | Command | What it does |
 |---|---|
+| `status` | Is everything healthy? |
 | `list` | Show the projects being watched |
-| `status` | Show which ones are running |
 | `add <name> <github-url>` | Start watching a project |
 | `remove <name>` | Stop watching a project |
-| `rebuild <name>` | Redeploy now, even with no new commit |
+| `deploy <name>` | Deploy now, even with no new commit |
 | `logs <name>` | Show a project's recent output |
 | `pause` / `resume` | Hold all deploys / carry on |
-| `help` | Everything else |
+| `help` | Everything else, with examples (`help setup` walks through preparing a repo) |
 
 ---
 
