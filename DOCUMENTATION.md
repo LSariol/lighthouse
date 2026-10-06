@@ -425,6 +425,73 @@ State lives in the bind mounts, so rebuilding is safe. A deploy in progress when
 
 **Upgrading from the pre-1.0 Lighthouse** (one time): the compose file no longer mounts `.env` or publishes port 2000, and it uses `COVE_URL` instead of `COVE_ADDRESS`. The repository's compose file already has these changes; `/srv/server/storage/lighthouse/.env` can be deleted afterwards. The CLI is now `docker exec -it lighthouse /lighthouse shell` instead of `docker attach`.
 
+### 10.1 Database setup (once, by hand)
+
+Needed before the v1.0.0 Lighthouse (it keeps its state in Postgres). This is Admin-level work, so it's done by hand, not by a migration ([§14.1](#141-databases-and-migrations)). Two scripts in `scripts/db/` do it:
+
+| Script | What it does |
+|---|---|
+| `check.sql` | **Read-only.** Shows the `lighthouse_*` roles, `lighthouse_db`'s owner and access, its schemas and tables |
+| `setup.sql` | Creates what's missing and fixes ownership and access (below). **Safe to run again; never changes an existing role's password**, and checks every missing password before changing anything |
+
+What `setup.sql` leaves behind:
+
+| Thing | State |
+|---|---|
+| `lighthouse_owner` | NOLOGIN, no password; owns the database and the `lighthouse` schema |
+| `lighthouse_migrator` | LOGIN; member of `lighthouse_owner` with `SET role = 'lighthouse_owner'`, so what migrations create is owned by the owner |
+| `lighthouse_app`, `lighthouse_reader` | LOGIN; existing passwords kept |
+| `lighthouse_db` | Owned by `lighthouse_owner`; `PUBLIC` may not connect; the three login roles may |
+| `public` schema in it | Nobody else may create objects there |
+
+Tables and their grants come later, from Lighthouse's migrations.
+
+**Dev** (`sparkdb-dev` on the PC): already in this state (checked 2026-10-05). Only the two connection strings are needed in the **dev** Cove, with `localhost:5000` as the host, since dev Lighthouse runs on the PC: `postgres://lighthouse_app:<password>@localhost:5000/lighthouse_db?sslmode=disable`.
+
+**Prod**, all on the Debian server over SSH unless marked:
+
+1. **Copy the scripts to the server** (on your PC, in PowerShell, from the repository folder):
+   ```powershell
+   scp scripts\db\check.sql scripts\db\setup.sql <you>@<server>:/tmp/
+   ```
+2. **Look first:**
+   ```bash
+   docker exec -i sparkdb psql -U Admin -d postgres -f - < /tmp/check.sql
+   ```
+   Note which `lighthouse_*` roles exist. Success: the command prints the tables (empty is fine).
+3. **Passwords in Cove** (`docker exec -it cove /cove shell`):
+   ```
+   list LIGHTHOUSE_
+   rename LIGHTHOUSE_APP_PASSWORD LIGHTHOUSE_DATABASE_APP_PASSWORD          # if it exists
+   rename LIGHTHOUSE_READER_PASSWORD LIGHTHOUSE_DATABASE_READER_PASSWORD    # if it exists
+   delete LIGHTHOUSE_OWNER_PASSWORD                                         # if it exists: the owner can't log in any more
+   generate LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD 32                        # and the same for any other role step 2 showed missing
+   ```
+4. **Run the setup.** Each password comes straight from Cove, so it never appears on screen or in your shell history:
+   ```bash
+   docker exec -i sparkdb psql -U Admin -d postgres \
+     -v migrator_password="$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD)" \
+     -f - < /tmp/setup.sql
+   ```
+   Add `-v app_password=...` or `-v reader_password=...` the same way only if that role was missing; the script says so and changes nothing if one is needed and not given. Success: `Done.` and every row matches its `want` column.
+5. **Connection strings into Cove.** First check the app password has only letters and digits. A URL can't hold `@ : / ? #` unescaped, and this prints only the verdict:
+   ```bash
+   docker exec cove /cove get LIGHTHOUSE_DATABASE_APP_PASSWORD | grep -qx '[A-Za-z0-9]*' && echo "plain: fine" || echo "special characters: generate a new one and ALTER ROLE"
+   ```
+   Then:
+   ```bash
+   docker exec cove /cove create LIGHTHOUSE_DATABASE_URL "postgres://lighthouse_app:$(docker exec cove /cove get LIGHTHOUSE_DATABASE_APP_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
+   docker exec cove /cove create LIGHTHOUSE_DATABASE_MIGRATOR_URL "postgres://lighthouse_migrator:$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
+   ```
+6. **Check both logins:**
+   ```bash
+   docker exec sparkdb psql "$(docker exec cove /cove get LIGHTHOUSE_DATABASE_URL)" -Atc "select current_user"            # lighthouse_app
+   docker exec sparkdb psql "$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_URL)" -Atc "select current_user"   # lighthouse_owner
+   ```
+7. **Clean up:** `rm /tmp/check.sql /tmp/setup.sql`, and tick the entry in the prod rollout plan.
+
+**Way back:** nothing reads these yet, so the roles and database can stay as they are. To undo the Cove side: `delete` the new keys and `rename` the old ones back.
+
 ---
 
 ## 11. Operations
@@ -1028,22 +1095,7 @@ Dependencies point one way: `main` → `cli` / `orchestrator` / `control` → `d
 
 ### 16.7 Database design
 
-**Admin, by hand, once** (roles and the database are server-wide). `lighthouse_db` exists already; check its owner and any existing `lighthouse_*` roles first, and log the change in the prod rollout plan:
-
-```sql
-CREATE ROLE lighthouse_owner    NOLOGIN;
-CREATE ROLE lighthouse_migrator LOGIN PASSWORD '...';
-CREATE ROLE lighthouse_app      LOGIN PASSWORD '...';   -- exists? keep its name and password
-CREATE ROLE lighthouse_reader   LOGIN PASSWORD '...';
-GRANT lighthouse_owner TO lighthouse_migrator;
-ALTER ROLE lighthouse_migrator SET role = 'lighthouse_owner';
-
-ALTER DATABASE lighthouse_db OWNER TO lighthouse_owner;
-REVOKE ALL ON DATABASE lighthouse_db FROM PUBLIC;
-GRANT CONNECT ON DATABASE lighthouse_db TO lighthouse_migrator, lighthouse_app, lighthouse_reader;
-```
-
-Connection strings go in Cove as `LIGHTHOUSE_DATABASE_URL` (app) and `LIGHTHOUSE_DATABASE_MIGRATOR_URL`. The role passwords go in as `LIGHTHOUSE_DATABASE_{APP,MIGRATOR,READER}_PASSWORD` (renaming the existing `LIGHTHOUSE_APP_PASSWORD` etc.). Lighthouse reads the URLs from Cove at startup with its own token.
+**Admin, by hand, once:** roles, the database, ownership and connect rights are server-wide, so no migration can do them. `scripts/db/setup.sql` does them, and [§10.1](#101-database-setup-once-by-hand) is the step-by-step. Connection strings go in Cove as `LIGHTHOUSE_DATABASE_URL` (app) and `LIGHTHOUSE_DATABASE_MIGRATOR_URL`; Lighthouse reads them from Cove at startup with its own token.
 
 **Migrations** (`internal/database/migrations/`, schema `lighthouse`, goose table `lighthouse.goose_db_version`, embedded, applied on startup under an advisory lock):
 
