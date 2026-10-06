@@ -27,8 +27,8 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 		if p.Name != "plop" || p.Repo != plop || p.CreatedAt.IsZero() || p.DeployedSHA != "" || p.Checks != 0 {
 			t.Errorf("Add returned %+v", p)
 		}
-		if p.Container() != "plop" {
-			t.Errorf("Container() = %q", p.Container())
+		if p.ComposeName() != "plop" {
+			t.Errorf("ComposeName() = %q", p.ComposeName())
 		}
 
 		got, err := s.Get(ctx, "PLOP")
@@ -83,7 +83,7 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 		if err := s.SetRepo(ctx, "plop", site); err != nil {
 			t.Fatal(err)
 		}
-		if p, _ := s.Get(ctx, "plop"); p.Repo != site || p.Container() != "plop-site" {
+		if p, _ := s.Get(ctx, "plop"); p.Repo != site || p.ComposeName() != "plop-site" {
 			t.Errorf("after SetRepo: %+v", p)
 		}
 		if err := s.SetRepo(ctx, "plop", cove); !errors.Is(err, projects.ErrRepoWatched) {
@@ -188,6 +188,146 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 		s.Add(ctx, "plop-web", plop)
 		if h, _ := s.History(ctx, "plop-web", 10); len(h) != 0 {
 			t.Errorf("a re-added project inherited history: %+v", h)
+		}
+	})
+
+	t.Run("ComposeProject", func(t *testing.T) {
+		s := open(t)
+		s.Add(ctx, "personalWebsite", github.Repo{Owner: "lsariol", Name: "Landing"})
+		s.Add(ctx, "cove", cove)
+
+		p, _ := s.Get(ctx, "personalWebsite")
+		if p.ComposeProject != "" || p.ComposeName() != "landing" {
+			t.Errorf("before a deploy: %q, ComposeName %q", p.ComposeProject, p.ComposeName())
+		}
+
+		if err := s.SetComposeProject(ctx, "personalwebsite", "website"); err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := s.Get(ctx, "personalWebsite"); p.ComposeProject != "website" || p.ComposeName() != "website" {
+			t.Errorf("after SetComposeProject: %+v", p)
+		}
+		if err := s.SetComposeProject(ctx, "personalWebsite", "website"); err != nil {
+			t.Errorf("setting the same compose project again: %v", err)
+		}
+		if err := s.SetComposeProject(ctx, "cove", "website"); !errors.Is(err, projects.ErrComposeProjectTaken) {
+			t.Errorf("another project's compose project = %v, want ErrComposeProjectTaken", err)
+		}
+		if err := s.SetComposeProject(ctx, "gone", "x"); !errors.Is(err, projects.ErrNotFound) {
+			t.Errorf("SetComposeProject of a missing project = %v", err)
+		}
+	})
+
+	t.Run("FailuresAndBroken", func(t *testing.T) {
+		s := open(t)
+		s.Add(ctx, "plop", plop)
+		start := time.Now().Add(-time.Hour)
+		fail := func(sha, kind string) {
+			t.Helper()
+			start = start.Add(time.Minute)
+			if err := s.RecordDeployment(ctx, projects.Deployment{Project: "plop", SHA: sha, Trigger: projects.TriggerCheck,
+				Status: projects.StatusFailed, FailureKind: kind, FailedStep: "build", StartedAt: start, FinishedAt: start, Error: "no"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Transient failures don't count.
+		fail("aaa", projects.FailureTransient)
+		fail("aaa", projects.FailureTransient)
+		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 0 || p.Broken {
+			t.Errorf("after transient failures: count %d, broken %v", p.FailureCount, p.Broken)
+		}
+
+		fail("aaa", projects.FailurePermanent)
+		fail("aaa", projects.FailurePermanent)
+		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 2 || p.FailingSHA != "aaa" || p.Broken {
+			t.Errorf("after two permanent failures: %+v", p)
+		}
+
+		// A new commit starts the count again.
+		fail("bbb", projects.FailurePermanent)
+		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 1 || p.FailingSHA != "bbb" {
+			t.Errorf("after a new commit failed: %+v", p)
+		}
+		fail("bbb", projects.FailurePermanent)
+		fail("bbb", projects.FailurePermanent)
+		if p, _ := s.Get(ctx, "plop"); p.FailureCount != projects.BrokenAfter || !p.Broken {
+			t.Errorf("after %d failures: %+v", projects.BrokenAfter, p)
+		}
+
+		// retry clears it; so does a success.
+		if err := s.ClearFailures(ctx, "PLOP"); err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 0 || p.Broken || p.FailingSHA != "" {
+			t.Errorf("after ClearFailures: %+v", p)
+		}
+		fail("bbb", projects.FailurePermanent)
+		s.RecordDeployment(ctx, projects.Deployment{Project: "plop", SHA: "ccc", Trigger: projects.TriggerCheck,
+			Status: projects.StatusSucceeded, StartedAt: start, FinishedAt: start})
+		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 0 || p.FailingSHA != "" || p.DeployedSHA != "ccc" {
+			t.Errorf("after a success: %+v", p)
+		}
+
+		// A rollback is a failure too.
+		s.RecordDeployment(ctx, projects.Deployment{Project: "plop", SHA: "ddd", Trigger: projects.TriggerCheck,
+			Status: projects.StatusRolledBack, FailureKind: projects.FailurePermanent, FailedStep: "verify",
+			StartedAt: start.Add(time.Minute), FinishedAt: start.Add(time.Minute), Error: "web didn't become healthy"})
+		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 1 || p.DeployedSHA != "ccc" || p.LastError == "" {
+			t.Errorf("after a rollback: %+v", p)
+		}
+		if err := s.ClearFailures(ctx, "gone"); !errors.Is(err, projects.ErrNotFound) {
+			t.Errorf("ClearFailures of a missing project = %v", err)
+		}
+	})
+
+	t.Run("DeploymentSteps", func(t *testing.T) {
+		s := open(t)
+		s.Add(ctx, "plop", plop)
+		start := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+		long := strings.Repeat("x", projects.MaxLogLength) + "THE END"
+
+		older := projects.Deployment{Project: "plop", SHA: "aaa", Trigger: projects.TriggerCheck, Status: projects.StatusSucceeded,
+			StartedAt: start, FinishedAt: start.Add(time.Minute),
+			Steps: []projects.Step{{Name: "fetch", Status: projects.StepSucceeded, StartedAt: start, FinishedAt: start}}}
+		newer := projects.Deployment{Project: "plop", SHA: "bbb", Trigger: projects.TriggerManual, Status: projects.StatusFailed,
+			FailureKind: projects.FailurePermanent, FailedStep: "build", Error: "build failed",
+			StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour + time.Minute),
+			Steps: []projects.Step{
+				{Name: "fetch", Status: projects.StepSucceeded, StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour), Log: "ok"},
+				{Name: "build", Status: projects.StepFailed, StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour), Log: long},
+				{Name: "swap", Status: projects.StepSkipped, StartedAt: start.Add(time.Hour), FinishedAt: start.Add(time.Hour)},
+			}}
+		for _, d := range []projects.Deployment{older, newer} {
+			if err := s.RecordDeployment(ctx, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		d, err := s.Deployment(ctx, "PLOP", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.SHA != "bbb" || d.FailedStep != "build" || d.FailureKind != projects.FailurePermanent || len(d.Steps) != 3 {
+			t.Fatalf("Deployment 1 = %+v", d)
+		}
+		if d.Steps[0].Name != "fetch" || d.Steps[0].Log != "ok" || d.Steps[1].Status != projects.StepFailed || d.Steps[2].Status != projects.StepSkipped {
+			t.Errorf("steps = %+v", d.Steps)
+		}
+		if l := d.Steps[1].Log; len(l) > projects.MaxLogLength || !strings.HasSuffix(l, "THE END") {
+			t.Errorf("a long log is stored at %d bytes, ending %q", len(l), l[len(l)-10:])
+		}
+		if d, _ := s.Deployment(ctx, "plop", 2); d.SHA != "aaa" || len(d.Steps) != 1 {
+			t.Errorf("Deployment 2 = %+v", d)
+		}
+		if _, err := s.Deployment(ctx, "plop", 3); !errors.Is(err, projects.ErrNoDeployment) {
+			t.Errorf("Deployment 3 = %v, want ErrNoDeployment", err)
+		}
+		if _, err := s.Deployment(ctx, "gone", 1); !errors.Is(err, projects.ErrNotFound) {
+			t.Errorf("Deployment of a missing project = %v", err)
+		}
+		if h, _ := s.History(ctx, "plop", 10); len(h) != 2 || h[0].FailedStep != "build" || h[0].Steps != nil {
+			t.Errorf("History = %+v", h)
 		}
 	})
 }

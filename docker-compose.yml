@@ -14,20 +14,19 @@ services:
       - LIGHTHOUSE_VERSION=dev   # set to the release version when releasing
       - COVE_URL=http://cove:2100
       - COVE_TOKEN_PATH=/app/vault/cove/token
-      - STAGING_PATH=/app/server/staging/
-      - DOWNLOAD_PATH=/app/server/download/
+      # Deploy folders. Mounted at the same path on the host and in here, so a
+      # relative bind mount in a project's compose file means the same files
+      # to Compose (in this container) and to Docker (on the host).
+      - STAGING_PATH=/srv/server/staging
     volumes:
       # Lighthouse's Cove token (written on first start by the bootstrap).
       - type: bind
         source: /srv/server/storage/lighthouse/cove
         target: /app/vault/cove
-      # Scratch space, emptied on every deploy.
+      # Deploy folders (see STAGING_PATH): the same path on both sides.
       - type: bind
-        source: /srv/server/staging/
-        target: /app/server/staging/
-      - type: bind
-        source: /srv/server/download/
-        target: /app/server/download/
+        source: /srv/server/staging
+        target: /srv/server/staging
       # Full control of the host's Docker: how Lighthouse deploys projects.
       - type: bind
         source: /var/run/docker.sock
@@ -35,6 +34,9 @@ services:
     # No terminal is attached: open the CLI with
     #   docker exec -it lighthouse /lighthouse shell
     restart: unless-stopped
+    # A deploy that already replaced a project's containers finishes its
+    # health check (or rollback) before Lighthouse stops.
+    stop_grace_period: 2m
     networks:
       - spark
 

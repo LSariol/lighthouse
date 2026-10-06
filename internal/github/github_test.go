@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,17 +42,18 @@ func TestParseRepoURL(t *testing.T) {
 	}
 
 	repo := Repo{Owner: "LSariol", Name: "plop"}
-	if repo.URL() != "https://github.com/LSariol/plop" ||
-		repo.APIURL() != "https://api.github.com/repos/LSariol/plop" ||
-		repo.ArchiveURL() != "https://github.com/LSariol/plop/archive/refs/heads/main.zip" {
-		t.Errorf("URLs: %s %s %s", repo.URL(), repo.APIURL(), repo.ArchiveURL())
+	if repo.URL() != "https://github.com/LSariol/plop" || repo.String() != "LSariol/plop" {
+		t.Errorf("URL %s, String %s", repo.URL(), repo.String())
 	}
 }
 
-func TestLatestCommit(t *testing.T) {
+// fakeGitHub serves the two endpoints Lighthouse uses, for repository o/good.
+func fakeGitHub(t *testing.T) Client {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer t" {
-			http.Error(w, "bad credentials", http.StatusUnauthorized)
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"message":"Bad credentials"}`))
 			return
 		}
 		switch r.URL.Path {
@@ -60,34 +62,78 @@ func TestLatestCommit(t *testing.T) {
 		case "/repos/o/empty/commits":
 			w.Write([]byte(`[]`))
 		case "/repos/o/weird/commits":
-			w.Write([]byte(`{"message":"not a list"}`))
+			w.Write([]byte(`{"not":"a list"}`))
+		case "/repos/o/good/tarball/abc123":
+			w.Write([]byte("tarball bytes"))
+		case "/repos/o/down/commits":
+			w.WriteHeader(http.StatusBadGateway)
+		case "/repos/o/limited/commits":
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"message":"API rate limit exceeded for user"}`))
 		default:
-			http.NotFound(w, r)
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"message":"Not Found"}`))
 		}
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return Client{HTTP: srv.Client(), API: srv.URL}
+}
 
-	c := Client{HTTP: srv.Client()}
+func temporary(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Temporary()
+}
+
+func TestLatestCommit(t *testing.T) {
+	c := fakeGitHub(t)
 	ctx := context.Background()
 
-	if sha, err := c.LatestCommit(ctx, srv.URL+"/repos/o/good", "t"); err != nil || sha != "abc123" {
+	if sha, err := c.LatestCommit(ctx, Repo{"o", "good"}, "t"); err != nil || sha != "abc123" {
 		t.Errorf("good: %q, %v", sha, err)
 	}
 
-	for name, want := range map[string]string{
-		"empty":   "no commits",
-		"weird":   "unexpected response",
-		"missing": "404",
-	} {
-		if _, err := c.LatestCommit(ctx, srv.URL+"/repos/o/"+name, "t"); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%s: err = %v, want one containing %q", name, err, want)
+	cases := []struct {
+		repo      string
+		token     string
+		contains  string
+		temporary bool
+	}{
+		{"empty", "t", "no commits", false},
+		{"weird", "t", "unexpected response", false},
+		{"missing", "t", "404", false},
+		{"good", "wrong", "Bad credentials", false},
+		{"down", "t", "502", true},
+		{"limited", "t", "rate limit", true},
+	}
+	for _, c2 := range cases {
+		_, err := c.LatestCommit(ctx, Repo{"o", c2.repo}, c2.token)
+		if err == nil || !strings.Contains(err.Error(), c2.contains) || temporary(err) != c2.temporary {
+			t.Errorf("%s: err = %v (temporary %v), want one containing %q (temporary %v)", c2.repo, err, temporary(err), c2.contains, c2.temporary)
 		}
 	}
 
-	if _, err := c.LatestCommit(ctx, srv.URL+"/repos/o/good", "wrong"); err == nil || !strings.Contains(err.Error(), "401") {
-		t.Errorf("wrong token: %v", err)
-	}
-	if _, err := c.LatestCommit(ctx, srv.URL+"/repos/o/good", ""); err == nil {
+	if _, err := c.LatestCommit(ctx, Repo{"o", "good"}, ""); err == nil {
 		t.Error("no token: no error")
+	}
+
+	unreachable := Client{API: "http://127.0.0.1:1"}
+	if _, err := unreachable.LatestCommit(ctx, Repo{"o", "good"}, "t"); !temporary(err) {
+		t.Errorf("unreachable GitHub = %v, want a temporary error", err)
+	}
+}
+
+func TestArchive(t *testing.T) {
+	c := fakeGitHub(t)
+	rc, err := c.Archive(context.Background(), Repo{"o", "good"}, "abc123", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if b, _ := io.ReadAll(rc); string(b) != "tarball bytes" {
+		t.Errorf("archive = %q", b)
+	}
+
+	if _, err := c.Archive(context.Background(), Repo{"o", "good"}, "nope", "t"); err == nil || temporary(err) {
+		t.Errorf("a missing commit = %v, want a permanent error", err)
 	}
 }

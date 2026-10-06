@@ -22,7 +22,7 @@ func (f *fakeService) Status(ctx context.Context) (Status, error) {
 		Projects: []Project{{Name: "plop", State: "running"}}}, nil
 }
 func (f *fakeService) Projects(ctx context.Context) ([]Project, error) {
-	return []Project{{Name: "plop", URL: "https://github.com/LSariol/plop", Container: "plop"}}, nil
+	return []Project{{Name: "plop", URL: "https://github.com/LSariol/plop", ComposeProject: "plop"}}, nil
 }
 func (f *fakeService) Add(ctx context.Context, name, url string) (Project, error) {
 	f.record("add " + name + " " + url)
@@ -31,8 +31,8 @@ func (f *fakeService) Add(ctx context.Context, name, url string) (Project, error
 	}
 	return Project{Name: name, URL: url}, nil
 }
-func (f *fakeService) Remove(ctx context.Context, name string) error {
-	f.record("remove " + name)
+func (f *fakeService) Remove(ctx context.Context, name string, down bool) error {
+	f.record(fmt.Sprintf("remove %s down=%v", name, down))
 	return Errorf(KindNotFound, "No project named %q.", name)
 }
 func (f *fakeService) Rename(ctx context.Context, name, newName string) error {
@@ -46,6 +46,14 @@ func (f *fakeService) SetURL(ctx context.Context, name, url string) error {
 func (f *fakeService) Deploy(ctx context.Context, name string) error {
 	f.record("deploy " + name)
 	return errors.New("something internal broke")
+}
+func (f *fakeService) Retry(ctx context.Context, name string) error {
+	f.record("retry " + name)
+	return nil
+}
+func (f *fakeService) Report(ctx context.Context, name string, n int) (Deployment, error) {
+	f.record(fmt.Sprintf("report %s %d", name, n))
+	return Deployment{Status: "rolled_back", Steps: []Step{{Name: "verify", Status: "failed", Log: "web is unhealthy"}}}, nil
 }
 func (f *fakeService) Scan(ctx context.Context) error   { f.record("scan"); return nil }
 func (f *fakeService) Pause(ctx context.Context) error  { f.record("pause"); return nil }
@@ -109,7 +117,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	projects, err := c.Projects(ctx)
-	if err != nil || len(projects) != 1 || projects[0].Container != "plop" {
+	if err != nil || len(projects) != 1 || projects[0].ComposeProject != "plop" {
 		t.Errorf("Projects = %+v, %v", projects, err)
 	}
 
@@ -123,6 +131,11 @@ func TestRoundTrip(t *testing.T) {
 		t.Errorf("Logs = %q, %v", logs, err)
 	}
 
+	report, err := c.Report(ctx, "plop", 2)
+	if err != nil || report.Status != "rolled_back" || len(report.Steps) != 1 || report.Steps[0].Log != "web is unhealthy" {
+		t.Errorf("Report = %+v, %v", report, err)
+	}
+
 	history, err := c.History(ctx, "plop", 5)
 	if err != nil || len(history) != 1 || history[0].Error != "build failed" {
 		t.Errorf("History = %+v, %v", history, err)
@@ -131,7 +144,8 @@ func TestRoundTrip(t *testing.T) {
 	for _, call := range []func() error{
 		func() error { return c.Rename(ctx, "plop", "plop2") },
 		func() error { return c.SetURL(ctx, "plop", "https://github.com/a/b") },
-		func() error { return c.Start(ctx, "plop") },
+		func() error { return c.Retry(ctx, "plop") },
+		func() error { return c.Start(ctx, "plop:web") },
 		func() error { return c.Stop(ctx, "plop") },
 		func() error { return c.Restart(ctx, "plop") },
 		func() error { return c.Scan(ctx) },
@@ -143,8 +157,8 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 
-	want := []string{"add new https://github.com/a/new", "logs plop", "history plop 5", "rename plop plop2", "set-url plop https://github.com/a/b",
-		"start plop", "stop plop", "restart plop", "scan", "pause", "resume"}
+	want := []string{"add new https://github.com/a/new", "logs plop", "report plop 2", "history plop 5", "rename plop plop2", "set-url plop https://github.com/a/b",
+		"retry plop", "start plop:web", "stop plop", "restart plop", "scan", "pause", "resume"}
 	if len(svc.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", svc.calls, want)
 	}
@@ -165,7 +179,7 @@ func TestErrorsKeepTheirKind(t *testing.T) {
 		t.Errorf("Add error = %#v", err)
 	}
 
-	if err := c.Remove(ctx, "x"); !errors.As(err, &e) || e.Kind != KindNotFound {
+	if err := c.Remove(ctx, "x", true); !errors.As(err, &e) || e.Kind != KindNotFound {
 		t.Errorf("Remove error = %#v", err)
 	}
 

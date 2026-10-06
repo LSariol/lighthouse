@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -192,14 +193,20 @@ func (c *CLI) confirmOrRefuse(question string, skip bool, what string) (bool, er
 
 // takeYesFlag removes --yes / -y from args and reports whether it was there.
 func takeYesFlag(args []string) (bool, []string) {
-	yes := false
+	return takeFlag(args, "--yes", "-y")
+}
+
+// takeFlag removes every spelling of a flag from args and reports whether it
+// was there.
+func takeFlag(args []string, spellings ...string) (bool, []string) {
+	found := false
 	rest := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == "--yes" || a == "-y" {
-			yes = true
+		if slices.Contains(spellings, a) {
+			found = true
 			continue
 		}
 		rest = append(rest, a)
 	}
-	return yes, rest
+	return found, rest
 }

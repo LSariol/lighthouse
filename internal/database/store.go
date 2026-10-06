@@ -20,9 +20,10 @@ var _ projects.Store = (*Database)(nil)
 const (
 	uniqueViolation = "23505"
 	checkViolation  = "23514"
-	nameKey         = "projects_name_key"   // unique index on lower(name)
-	repoKey         = "projects_repo_key"   // unique index on the repository
-	nameCheck       = "projects_name_check" // the name's format
+	nameKey         = "projects_name_key"            // unique index on lower(name)
+	repoKey         = "projects_repo_key"            // unique index on the repository
+	composeKey      = "projects_compose_project_key" // unique index on compose_project
+	nameCheck       = "projects_name_check"          // the name's format
 )
 
 // constraintError maps a unique or check violation to a projects error.
@@ -36,19 +37,23 @@ func constraintError(err error) error {
 		return projects.ErrNameTaken
 	case pgErr.Code == uniqueViolation && pgErr.ConstraintName == repoKey:
 		return projects.ErrRepoWatched
+	case pgErr.Code == uniqueViolation && pgErr.ConstraintName == composeKey:
+		return projects.ErrComposeProjectTaken
 	case pgErr.Code == checkViolation && pgErr.ConstraintName == nameCheck:
 		return projects.ErrInvalidName
 	}
 	return err
 }
 
-const projectColumns = `name, repo_owner, repo_name, created_at, coalesce(deployed_sha, ''), deployed_at,
-	last_checked_at, check_count, coalesce(last_error, ''), last_error_at`
+const projectColumns = `name, repo_owner, repo_name, created_at, coalesce(compose_project, ''),
+	coalesce(deployed_sha, ''), deployed_at, last_checked_at, check_count, coalesce(last_error, ''), last_error_at,
+	failure_count, coalesce(failing_sha, ''), broken`
 
 func scanProject(row pgx.Row) (projects.Project, error) {
 	var p projects.Project
-	err := row.Scan(&p.Name, &p.Repo.Owner, &p.Repo.Name, &p.CreatedAt, &p.DeployedSHA, &p.DeployedAt,
-		&p.LastCheckedAt, &p.Checks, &p.LastError, &p.LastErrorAt)
+	err := row.Scan(&p.Name, &p.Repo.Owner, &p.Repo.Name, &p.CreatedAt, &p.ComposeProject,
+		&p.DeployedSHA, &p.DeployedAt, &p.LastCheckedAt, &p.Checks, &p.LastError, &p.LastErrorAt,
+		&p.FailureCount, &p.FailingSHA, &p.Broken)
 	return p, err
 }
 
@@ -124,6 +129,10 @@ func (d *Database) SetRepo(ctx context.Context, name string, repo github.Repo) e
 		WHERE lower(name) = lower($1)`, name, repo.Owner, repo.Name)
 }
 
+func (d *Database) SetComposeProject(ctx context.Context, name string, composeProject string) error {
+	return d.exec(ctx, `UPDATE lighthouse.projects SET compose_project = $2 WHERE lower(name) = lower($1)`, name, composeProject)
+}
+
 func (d *Database) RecordCheck(ctx context.Context, name string, checkErr error) error {
 	return d.exec(ctx, `UPDATE lighthouse.projects
 		SET last_checked_at = now(),
@@ -134,7 +143,7 @@ func (d *Database) RecordCheck(ctx context.Context, name string, checkErr error)
 }
 
 func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment) error {
-	errText := projects.ErrorText(errorString(dep.Error))
+	errText := projects.ErrorText(projects.ErrorString(dep.Error))
 
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
 		var id int64
@@ -146,18 +155,41 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 			return fmt.Errorf("record deployment: %w", err)
 		}
 
-		if _, err := tx.Exec(ctx, `INSERT INTO lighthouse.deployments
-			(project_id, sha, trigger, status, started_at, finished_at, error)
-			VALUES ($1, nullif($2, ''), $3, $4, $5, $6, nullif($7, ''))`,
-			id, dep.SHA, dep.Trigger, dep.Status, dep.StartedAt, dep.FinishedAt, errText); err != nil {
+		var depID int64
+		err = tx.QueryRow(ctx, `INSERT INTO lighthouse.deployments
+			(project_id, sha, trigger, status, failure_kind, failed_step, started_at, finished_at, error)
+			VALUES ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), $7, $8, nullif($9, ''))
+			RETURNING id`,
+			id, dep.SHA, dep.Trigger, dep.Status, dep.FailureKind, dep.FailedStep, dep.StartedAt, dep.FinishedAt, errText).Scan(&depID)
+		if err != nil {
 			return fmt.Errorf("record deployment: %w", err)
 		}
 
-		if dep.Status == projects.StatusSucceeded {
+		for i, st := range dep.Steps {
+			if _, err := tx.Exec(ctx, `INSERT INTO lighthouse.deployment_steps
+				(deployment_id, position, step, status, started_at, finished_at, log)
+				VALUES ($1, $2, $3, $4, $5, $6, nullif($7, ''))`,
+				depID, i+1, st.Name, st.Status, st.StartedAt, st.FinishedAt, projects.LogText(st.Log)); err != nil {
+				return fmt.Errorf("record deployment step %s: %w", st.Name, err)
+			}
+		}
+
+		switch {
+		case dep.Status == projects.StatusSucceeded:
 			_, err = tx.Exec(ctx, `UPDATE lighthouse.projects
-				SET deployed_sha = $2, deployed_at = $3, last_error = NULL, last_error_at = NULL WHERE id = $1`,
-				id, dep.SHA, dep.FinishedAt)
-		} else {
+				SET deployed_sha = $2, deployed_at = $3, last_error = NULL, last_error_at = NULL,
+				    failure_count = 0, failing_sha = NULL, broken = false
+				WHERE id = $1`, id, dep.SHA, dep.FinishedAt)
+		case dep.FailureKind == projects.FailurePermanent:
+			// The count restarts with a new commit; at BrokenAfter the
+			// project is broken.
+			_, err = tx.Exec(ctx, `UPDATE lighthouse.projects
+				SET last_error = nullif($2, ''), last_error_at = $3,
+				    failure_count = CASE WHEN failing_sha IS NOT DISTINCT FROM nullif($4, '') THEN failure_count + 1 ELSE 1 END,
+				    failing_sha   = nullif($4, ''),
+				    broken        = (CASE WHEN failing_sha IS NOT DISTINCT FROM nullif($4, '') THEN failure_count + 1 ELSE 1 END) >= $5
+				WHERE id = $1`, id, errText, dep.FinishedAt, dep.SHA, projects.BrokenAfter)
+		default:
 			_, err = tx.Exec(ctx, `UPDATE lighthouse.projects SET last_error = nullif($2, ''), last_error_at = $3 WHERE id = $1`,
 				id, errText, dep.FinishedAt)
 		}
@@ -168,31 +200,82 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 	})
 }
 
+func (d *Database) ClearFailures(ctx context.Context, name string) error {
+	return d.exec(ctx, `UPDATE lighthouse.projects SET failure_count = 0, failing_sha = NULL, broken = false
+		WHERE lower(name) = lower($1)`, name)
+}
+
+const deploymentColumns = `d.id, coalesce(d.sha, ''), d.trigger, d.status, coalesce(d.failure_kind, ''), coalesce(d.failed_step, ''),
+	d.started_at, d.finished_at, coalesce(d.error, '')`
+
+// deployments returns the project's deployments, newest first, with their
+// IDs.
+func (d *Database) deployments(ctx context.Context, p projects.Project, limit int, offset int) ([]projects.Deployment, []int64, error) {
+	rows, err := d.pool.Query(ctx, `SELECT `+deploymentColumns+`
+		FROM lighthouse.deployments d JOIN lighthouse.projects p ON p.id = d.project_id
+		WHERE lower(p.name) = lower($1)
+		ORDER BY d.started_at DESC, d.id DESC
+		LIMIT $2 OFFSET $3`, p.Name, limit, offset)
+	if err != nil {
+		return nil, nil, fmt.Errorf("history of %q: %w", p.Name, err)
+	}
+	defer rows.Close()
+
+	var list []projects.Deployment
+	var ids []int64
+	for rows.Next() {
+		dep := projects.Deployment{Project: p.Name}
+		var id int64
+		if err := rows.Scan(&id, &dep.SHA, &dep.Trigger, &dep.Status, &dep.FailureKind, &dep.FailedStep,
+			&dep.StartedAt, &dep.FinishedAt, &dep.Error); err != nil {
+			return nil, nil, fmt.Errorf("history of %q: %w", p.Name, err)
+		}
+		list = append(list, dep)
+		ids = append(ids, id)
+	}
+	return list, ids, rows.Err()
+}
+
 func (d *Database) History(ctx context.Context, name string, limit int) ([]projects.Deployment, error) {
 	p, err := d.Get(ctx, name)
 	if err != nil {
 		return nil, err
 	}
+	list, _, err := d.deployments(ctx, p, limit, 0)
+	return list, err
+}
 
-	rows, err := d.pool.Query(ctx, `SELECT coalesce(d.sha, ''), d.trigger, d.status, d.started_at, d.finished_at, coalesce(d.error, '')
-		FROM lighthouse.deployments d JOIN lighthouse.projects p ON p.id = d.project_id
-		WHERE lower(p.name) = lower($1)
-		ORDER BY d.started_at DESC, d.id DESC
-		LIMIT $2`, name, limit)
+func (d *Database) Deployment(ctx context.Context, name string, n int) (projects.Deployment, error) {
+	p, err := d.Get(ctx, name)
 	if err != nil {
-		return nil, fmt.Errorf("history of %q: %w", name, err)
+		return projects.Deployment{}, err
+	}
+	if n < 1 {
+		return projects.Deployment{}, projects.ErrNoDeployment
+	}
+	list, ids, err := d.deployments(ctx, p, 1, n-1)
+	if err != nil {
+		return projects.Deployment{}, err
+	}
+	if len(list) == 0 {
+		return projects.Deployment{}, projects.ErrNoDeployment
+	}
+	dep := list[0]
+
+	rows, err := d.pool.Query(ctx, `SELECT step, status, started_at, finished_at, coalesce(log, '')
+		FROM lighthouse.deployment_steps WHERE deployment_id = $1 ORDER BY position`, ids[0])
+	if err != nil {
+		return projects.Deployment{}, fmt.Errorf("steps of a deployment of %q: %w", p.Name, err)
 	}
 	defer rows.Close()
-
-	var history []projects.Deployment
 	for rows.Next() {
-		dep := projects.Deployment{Project: p.Name}
-		if err := rows.Scan(&dep.SHA, &dep.Trigger, &dep.Status, &dep.StartedAt, &dep.FinishedAt, &dep.Error); err != nil {
-			return nil, fmt.Errorf("history of %q: %w", name, err)
+		var st projects.Step
+		if err := rows.Scan(&st.Name, &st.Status, &st.StartedAt, &st.FinishedAt, &st.Log); err != nil {
+			return projects.Deployment{}, fmt.Errorf("steps of a deployment of %q: %w", p.Name, err)
 		}
-		history = append(history, dep)
+		dep.Steps = append(dep.Steps, st)
 	}
-	return history, rows.Err()
+	return dep, rows.Err()
 }
 
 // Import adds a project with its recorded state, as read from a pre-1.0
@@ -210,11 +293,6 @@ func (d *Database) Import(ctx context.Context, p projects.Project) error {
 		(name, repo_owner, repo_name, created_at, deployed_sha, deployed_at, last_checked_at, check_count, last_error, last_error_at)
 		VALUES ($1, $2, $3, $4, nullif($5, ''), $6, $7, $8, nullif($9, ''), $10)`,
 		p.Name, p.Repo.Owner, p.Repo.Name, created, p.DeployedSHA, p.DeployedAt,
-		p.LastCheckedAt, p.Checks, projects.ErrorText(errorString(p.LastError)), p.LastErrorAt)
+		p.LastCheckedAt, p.Checks, projects.ErrorText(projects.ErrorString(p.LastError)), p.LastErrorAt)
 	return constraintError(err)
 }
-
-// errorString lets a stored message go through projects.ErrorText.
-type errorString string
-
-func (e errorString) Error() string { return string(e) }

@@ -19,20 +19,29 @@ type Service interface {
 	Projects(ctx context.Context) ([]Project, error)
 
 	Add(ctx context.Context, name string, url string) (Project, error)
-	Remove(ctx context.Context, name string) error
+	// Remove stops watching a project; with down, its containers are
+	// stopped and removed too.
+	Remove(ctx context.Context, name string, down bool) error
 	Rename(ctx context.Context, name string, newName string) error
 	SetURL(ctx context.Context, name string, url string) error
 
 	Deploy(ctx context.Context, name string) error
+	// Retry clears a project's failures and broken state, and deploys it.
+	Retry(ctx context.Context, name string) error
 	Scan(ctx context.Context) error
 	Pause(ctx context.Context) error
 	Resume(ctx context.Context) error
 
-	Start(ctx context.Context, name string) error
-	Stop(ctx context.Context, name string) error
-	Restart(ctx context.Context, name string) error
-	Logs(ctx context.Context, name string, lines int) (string, error)
+	// Start, Stop, Restart and Logs take a target: a project's name (every
+	// service) or "<project>:<service>" (one).
+	Start(ctx context.Context, target string) error
+	Stop(ctx context.Context, target string) error
+	Restart(ctx context.Context, target string) error
+	Logs(ctx context.Context, target string, lines int) (string, error)
+
 	History(ctx context.Context, name string, limit int) ([]Deployment, error)
+	// Report returns one deployment with its steps: 1 is the latest.
+	Report(ctx context.Context, name string, n int) (Deployment, error)
 }
 
 // Status is the daemon's health and every project's container state.
@@ -52,27 +61,52 @@ type Status struct {
 
 // Project is one watched repository.
 type Project struct {
-	Name          string     `json:"name"`
-	URL           string     `json:"url"`
-	Container     string     `json:"container"`
-	State         string     `json:"state,omitempty"` // Docker's state, in Status only: "running", "exited", "missing"
-	Commit        string     `json:"commit,omitempty"`
-	WatchingSince time.Time  `json:"watchingSince"`
-	LastDeployed  *time.Time `json:"lastDeployed,omitempty"`
-	LastChecked   *time.Time `json:"lastChecked,omitempty"`
-	Checks        int        `json:"checks"`
-	LastError     string     `json:"lastError,omitempty"`
-	LastErrorAt   *time.Time `json:"lastErrorAt,omitempty"`
+	Name           string `json:"name"`
+	URL            string `json:"url"`
+	ComposeProject string `json:"composeProject"` // as its compose file names it (or the repository's name before a deploy)
+	// State sums up its services, in Status only: "running", "degraded"
+	// (some aren't), "stopped" (none is) or "missing" (no containers).
+	State         string          `json:"state,omitempty"`
+	Services      []ServiceStatus `json:"services,omitempty"` // in Status only
+	Commit        string          `json:"commit,omitempty"`
+	WatchingSince time.Time       `json:"watchingSince"`
+	LastDeployed  *time.Time      `json:"lastDeployed,omitempty"`
+	LastChecked   *time.Time      `json:"lastChecked,omitempty"`
+	Checks        int             `json:"checks"`
+	LastError     string          `json:"lastError,omitempty"`
+	LastErrorAt   *time.Time      `json:"lastErrorAt,omitempty"`
+	FailureCount  int             `json:"failureCount,omitempty"`
+	Broken        bool            `json:"broken,omitempty"` // its latest commit failed too often; `retry` or a new commit
+}
+
+// ServiceStatus is one service of a project, as running now.
+type ServiceStatus struct {
+	Name      string `json:"name"`
+	Container string `json:"container"`
+	State     string `json:"state"`            // "running", "exited", ...
+	Health    string `json:"health,omitempty"` // "healthy", "unhealthy", "starting", or "" without a healthcheck
 }
 
 // Deployment is one deploy attempt, from the project's history.
 type Deployment struct {
-	Commit     string    `json:"commit,omitempty"`
-	Trigger    string    `json:"trigger"` // "check" or "manual"
-	Status     string    `json:"status"`  // "succeeded" or "failed"
+	Commit      string    `json:"commit,omitempty"`
+	Trigger     string    `json:"trigger"`               // "check" or "manual"
+	Status      string    `json:"status"`                // "succeeded", "failed" or "rolled_back"
+	FailureKind string    `json:"failureKind,omitempty"` // "transient" or "permanent"
+	FailedStep  string    `json:"failedStep,omitempty"`
+	StartedAt   time.Time `json:"startedAt"`
+	FinishedAt  time.Time `json:"finishedAt"`
+	Error       string    `json:"error,omitempty"`
+	Steps       []Step    `json:"steps,omitempty"` // in Report only
+}
+
+// Step is one step of a deployment.
+type Step struct {
+	Name       string    `json:"name"`
+	Status     string    `json:"status"` // "succeeded", "failed" or "skipped"
 	StartedAt  time.Time `json:"startedAt"`
 	FinishedAt time.Time `json:"finishedAt"`
-	Error      string    `json:"error,omitempty"`
+	Log        string    `json:"log,omitempty"`
 }
 
 // Error kinds, mapped to HTTP status codes on the socket.

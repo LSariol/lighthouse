@@ -135,6 +135,32 @@ func (c *CLI) projectNamesOrAll() []string {
 	return append(c.projectNames(), "all")
 }
 
+// projectTargets is every project's name and every "<name>:<service>", for
+// the container commands.
+func (c *CLI) projectTargets() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	s, err := c.svc.Status(ctx)
+	if err != nil {
+		return c.projectNames()
+	}
+	var targets []string
+	for _, p := range s.Projects {
+		targets = append(targets, p.Name)
+		for _, svc := range p.Services {
+			targets = append(targets, p.Name+":"+svc.Name)
+		}
+	}
+	sort.Strings(targets)
+	return targets
+}
+
+// projectTargetsOrAll is projectTargets plus "all".
+func (c *CLI) projectTargetsOrAll() []string {
+	return append(c.projectTargets(), "all")
+}
+
 func commonPrefix(words []string) string {
 	prefix := words[0]
 	for _, w := range words[1:] {

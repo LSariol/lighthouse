@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LSariol/LightHouse/internal/control"
 )
 
 func (c *CLI) deploy(ctx context.Context, args []string) error {
@@ -121,15 +123,16 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	rows := [][]string{{"WHEN", "TRIGGER", "RESULT", "COMMIT", "TOOK", "ERROR"}}
-	for _, d := range deploys {
+	rows := [][]string{{"#", "WHEN", "TRIGGER", "RESULT", "COMMIT", "TOOK", "ERROR"}}
+	for i, d := range deploys {
 		started := d.StartedAt
 		rows = append(rows, []string{
-			ago(&started), d.Trigger, d.Status, shortSHA(d.Commit),
-			d.FinishedAt.Sub(d.StartedAt).Round(time.Second).String(), firstLine(d.Error, 60),
+			strconv.Itoa(i + 1), ago(&started), d.Trigger, result(d), shortSHA(d.Commit),
+			d.FinishedAt.Sub(d.StartedAt).Round(time.Second).String(), firstLine(d.Error, 50),
 		})
 	}
 	table(rows)
+	info(fmt.Sprintf("\"report %s <#>\" shows one in detail.", args[1]))
 	return nil
 }
 
@@ -145,4 +148,81 @@ func firstLine(s string, max int) string {
 		s = string(r[:max-1]) + "…"
 	}
 	return s
+}
+
+// result describes how a deploy went: "succeeded", "failed at build",
+// "rolled back at verify".
+func result(d control.Deployment) string {
+	switch d.Status {
+	case "succeeded":
+		return "succeeded"
+	case "rolled_back":
+		return "rolled back at " + d.FailedStep
+	default:
+		if d.FailedStep != "" {
+			return "failed at " + d.FailedStep
+		}
+		return d.Status
+	}
+}
+
+func (c *CLI) retry(ctx context.Context, args []string) error {
+	if len(args) != 2 {
+		return usageError{form: "retry <name>"}
+	}
+	info(fmt.Sprintf("Clearing %s's failures and deploying it. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", args[1]))
+	if err := c.svc.Retry(ctx, args[1]); err != nil {
+		return err
+	}
+	success(fmt.Sprintf("Deployed %s.", args[1]))
+	return nil
+}
+
+func (c *CLI) report(ctx context.Context, args []string) error {
+	if len(args) < 2 || len(args) > 3 {
+		return usageError{form: "report <name> [n]"}
+	}
+	n := 1
+	if len(args) == 3 {
+		v, err := strconv.Atoi(args[2])
+		if err != nil || v < 1 {
+			return usageError{reason: fmt.Sprintf("%q isn't a deploy number (1 is the latest).", args[2]), form: "report <name> [n]"}
+		}
+		n = v
+	}
+
+	d, err := c.svc.Report(ctx, args[1], n)
+	if err != nil {
+		return err
+	}
+
+	started := d.StartedAt
+	table([][]string{
+		{"Commit", orDash(d.Commit)},
+		{"Started", started.Local().Format("2006-01-02 15:04:05") + " (" + ago(&started) + "), by " + d.Trigger},
+		{"Result", result(d) + kindNote(d.FailureKind)},
+		{"Took", d.FinishedAt.Sub(d.StartedAt).Round(time.Second).String()},
+	})
+	if d.Error != "" {
+		out("")
+		out(d.Error)
+	}
+	for _, st := range d.Steps {
+		out("")
+		out(fmt.Sprintf("== %s: %s (%s)", st.Name, st.Status, st.FinishedAt.Sub(st.StartedAt).Round(time.Millisecond)))
+		if log := strings.TrimRight(st.Log, "\n"); log != "" {
+			out(log)
+		}
+	}
+	return nil
+}
+
+func kindNote(kind string) string {
+	switch kind {
+	case "transient":
+		return " (a passing problem: tried again next check)"
+	case "permanent":
+		return " (a problem with the commit: counts toward broken)"
+	}
+	return ""
 }

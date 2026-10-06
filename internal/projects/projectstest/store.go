@@ -18,7 +18,7 @@ import (
 type Store struct {
 	mu          sync.Mutex
 	projects    []projects.Project
-	deployments []projects.Deployment
+	deployments []projects.Deployment // oldest first
 }
 
 var _ projects.Store = (*Store)(nil)
@@ -133,6 +133,22 @@ func (s *Store) SetRepo(ctx context.Context, name string, repo github.Repo) erro
 	return nil
 }
 
+func (s *Store) SetComposeProject(ctx context.Context, name string, composeProject string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.index(name)
+	if i < 0 {
+		return projects.ErrNotFound
+	}
+	for j, p := range s.projects {
+		if j != i && p.ComposeProject == composeProject {
+			return projects.ErrComposeProjectTaken
+		}
+	}
+	s.projects[i].ComposeProject = composeProject
+	return nil
+}
+
 func (s *Store) RecordCheck(ctx context.Context, name string, checkErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,7 +160,11 @@ func (s *Store) RecordCheck(ctx context.Context, name string, checkErr error) er
 	now := time.Now()
 	p.LastCheckedAt = &now
 	p.Checks++
-	setError(p, checkErr, now)
+	if checkErr == nil {
+		p.LastError, p.LastErrorAt = "", nil
+	} else {
+		p.LastError, p.LastErrorAt = projects.ErrorText(checkErr), &now
+	}
 	return nil
 }
 
@@ -157,19 +177,57 @@ func (s *Store) RecordDeployment(ctx context.Context, d projects.Deployment) err
 	}
 	p := &s.projects[i]
 	d.Project = p.Name
-	d.Error = projects.ErrorText(errorString(d.Error))
+	d.Error = projects.ErrorText(projects.ErrorString(d.Error))
+	steps := make([]projects.Step, len(d.Steps))
+	for k, st := range d.Steps {
+		st.Log = projects.LogText(st.Log)
+		steps[k] = st
+	}
+	d.Steps = steps
 	s.deployments = append(s.deployments, d)
 
+	finished := d.FinishedAt
 	if d.Status == projects.StatusSucceeded {
-		finished := d.FinishedAt
-		p.DeployedSHA = d.SHA
-		p.DeployedAt = &finished
+		p.DeployedSHA, p.DeployedAt = d.SHA, &finished
 		p.LastError, p.LastErrorAt = "", nil
-	} else {
-		finished := d.FinishedAt
-		p.LastError, p.LastErrorAt = d.Error, &finished
+		p.FailureCount, p.FailingSHA, p.Broken = 0, "", false
+		return nil
+	}
+
+	p.LastError, p.LastErrorAt = d.Error, &finished
+	if d.FailureKind == projects.FailurePermanent {
+		if p.FailingSHA == d.SHA {
+			p.FailureCount++
+		} else {
+			p.FailureCount, p.FailingSHA = 1, d.SHA
+		}
+		p.Broken = p.FailureCount >= projects.BrokenAfter
 	}
 	return nil
+}
+
+func (s *Store) ClearFailures(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.index(name)
+	if i < 0 {
+		return projects.ErrNotFound
+	}
+	p := &s.projects[i]
+	p.FailureCount, p.FailingSHA, p.Broken = 0, "", false
+	return nil
+}
+
+// newest returns the project's deployments, newest first. s.mu must be held.
+func (s *Store) newest(project string) []projects.Deployment {
+	var list []projects.Deployment
+	for k := len(s.deployments) - 1; k >= 0; k-- {
+		if s.deployments[k].Project == project {
+			list = append(list, s.deployments[k])
+		}
+	}
+	sort.SliceStable(list, func(a, b int) bool { return list[a].StartedAt.After(list[b].StartedAt) })
+	return list
 }
 
 func (s *Store) History(ctx context.Context, name string, limit int) ([]projects.Deployment, error) {
@@ -179,23 +237,28 @@ func (s *Store) History(ctx context.Context, name string, limit int) ([]projects
 	if i < 0 {
 		return nil, projects.ErrNotFound
 	}
-	var history []projects.Deployment
-	for k := len(s.deployments) - 1; k >= 0 && len(history) < limit; k-- {
-		if s.deployments[k].Project == s.projects[i].Name {
-			history = append(history, s.deployments[k])
-		}
+	list := s.newest(s.projects[i].Name)
+	if len(list) > limit {
+		list = list[:limit]
+	}
+	history := make([]projects.Deployment, len(list))
+	for k, d := range list {
+		d.Steps = nil
+		history[k] = d
 	}
 	return history, nil
 }
 
-func setError(p *projects.Project, err error, at time.Time) {
-	if err == nil {
-		p.LastError, p.LastErrorAt = "", nil
-		return
+func (s *Store) Deployment(ctx context.Context, name string, n int) (projects.Deployment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.index(name)
+	if i < 0 {
+		return projects.Deployment{}, projects.ErrNotFound
 	}
-	p.LastError, p.LastErrorAt = projects.ErrorText(err), &at
+	list := s.newest(s.projects[i].Name)
+	if n < 1 || n > len(list) {
+		return projects.Deployment{}, projects.ErrNoDeployment
+	}
+	return list[n-1], nil
 }
-
-type errorString string
-
-func (e errorString) Error() string { return string(e) }

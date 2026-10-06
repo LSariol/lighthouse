@@ -1,0 +1,218 @@
+// Package compose runs the docker compose commands a deploy needs. Every
+// command has a context (so it has a deadline and stops on shutdown) and runs
+// with a clean environment: only what docker itself needs, plus what the
+// caller passes. Lighthouse's own settings never reach a project.
+package compose
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"sort"
+	"strings"
+)
+
+// Project is what Lighthouse needs from a compose file.
+type Project struct {
+	// Name is the compose project's name: the file's `name:`, or, without
+	// one, the folder it's in.
+	Name     string
+	Services []Service
+}
+
+// Service is one service of a compose project.
+type Service struct {
+	Name  string
+	Image string // the `image:` it names, or "" for a service that's only built
+	Build bool   // built from a Dockerfile
+}
+
+// ImageName is the image Compose gives the service: its `image:`, or
+// <project>-<service> for one that's only built.
+func (s Service) ImageName(project string) string {
+	if s.Image != "" {
+		return s.Image
+	}
+	return project + "-" + s.Name
+}
+
+// Variable is a ${...} variable a compose file uses.
+type Variable struct {
+	Name     string
+	Default  string // its default, e.g. "x" in ${NAME:-x}, or ""
+	Required bool   // ${NAME:?message}
+}
+
+// Runner runs docker compose.
+type Runner struct {
+	// Docker is the docker binary; "docker" if empty.
+	Docker string
+}
+
+func (r Runner) command(ctx context.Context, dir string, env []string, args ...string) *exec.Cmd {
+	bin := r.Docker
+	if bin == "" {
+		bin = "docker"
+	}
+	cmd := exec.CommandContext(ctx, bin, append([]string{"compose"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(BaseEnv(), env...)
+	return cmd
+}
+
+// run runs a command, sending its output to out and returning an error that
+// includes the output's last lines.
+func (r Runner) run(ctx context.Context, dir string, env []string, out io.Writer, args ...string) error {
+	var tail tailBuffer
+	cmd := r.command(ctx, dir, env, args...)
+	w := io.MultiWriter(&tail, out)
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("docker compose %s: %w", args[0], ctx.Err())
+		}
+		return fmt.Errorf("docker compose %s failed (%v): %s", firstArg(args), err, tail.lastLines(3))
+	}
+	return nil
+}
+
+// output runs a command and returns its standard output.
+func (r Runner) output(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := r.command(ctx, dir, nil, args...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("docker compose %s: %w", firstArg(args), ctx.Err())
+		}
+		return nil, fmt.Errorf("docker compose %s failed (%v): %s", firstArg(args), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+func firstArg(args []string) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return args[0]
+}
+
+// Inspect reads the compose file in dir without filling in variables.
+func (r Runner) Inspect(ctx context.Context, dir string) (Project, error) {
+	out, err := r.output(ctx, dir, "config", "--no-interpolate", "--format", "json")
+	if err != nil {
+		return Project{}, err
+	}
+
+	var raw struct {
+		Name     string `json:"name"`
+		Services map[string]struct {
+			Image string          `json:"image"`
+			Build json.RawMessage `json:"build"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return Project{}, fmt.Errorf("docker compose config: unexpected output: %v", err)
+	}
+
+	p := Project{Name: raw.Name}
+	for name, s := range raw.Services {
+		p.Services = append(p.Services, Service{Name: name, Image: s.Image, Build: len(s.Build) > 0 && string(s.Build) != "null"})
+	}
+	sort.Slice(p.Services, func(i, j int) bool { return p.Services[i].Name < p.Services[j].Name })
+	return p, nil
+}
+
+// Variables lists the ${...} variables the compose file in dir uses. An
+// escaped $${...} isn't one.
+func (r Runner) Variables(ctx context.Context, dir string) ([]Variable, error) {
+	out, err := r.output(ctx, dir, "config", "--variables", "--format", "json")
+	if err != nil {
+		return nil, err
+	}
+
+	var raw map[string]struct {
+		Name         string
+		DefaultValue string
+		Required     bool
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("docker compose config --variables: unexpected output: %v", err)
+	}
+
+	vars := make([]Variable, 0, len(raw))
+	for name, v := range raw {
+		vars = append(vars, Variable{Name: name, Default: v.DefaultValue, Required: v.Required})
+	}
+	sort.Slice(vars, func(i, j int) bool { return vars[i].Name < vars[j].Name })
+	return vars, nil
+}
+
+// Build builds the project's images. env holds its variables (KEY=value).
+func (r Runner) Build(ctx context.Context, dir string, project string, env []string, out io.Writer) error {
+	return r.run(ctx, dir, env, out, "-p", project, "build")
+}
+
+// Up starts the project from images already built, replacing its running
+// containers, and removes containers of services it no longer has.
+func (r Runner) Up(ctx context.Context, dir string, project string, env []string, out io.Writer) error {
+	return r.run(ctx, dir, env, out, "-p", project, "up", "-d", "--no-build", "--remove-orphans")
+}
+
+// Down stops and removes the project's containers and networks. It needs no
+// compose file: Compose finds them by their labels. dir must be a folder
+// without a compose file (Compose would read one).
+func (r Runner) Down(ctx context.Context, dir string, project string, out io.Writer) error {
+	return r.run(ctx, dir, nil, out, "-p", project, "down")
+}
+
+// baseVars are the environment variables docker and compose themselves need,
+// on Linux and on Windows. Everything else in Lighthouse's environment stays
+// out of a project's reach.
+var baseVars = map[string]bool{
+	"PATH": true, "HOME": true, "USER": true, "TMPDIR": true, "TMP": true, "TEMP": true,
+	"DOCKER_HOST": true, "DOCKER_CONFIG": true, "DOCKER_CONTEXT": true, "DOCKER_CERT_PATH": true, "DOCKER_TLS_VERIFY": true,
+	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true, "USERPROFILE": true,
+	"APPDATA": true, "LOCALAPPDATA": true, "PROGRAMDATA": true, "PROGRAMFILES": true, "HOMEDRIVE": true, "HOMEPATH": true,
+}
+
+// BaseEnv returns the part of this process's environment that docker needs.
+func BaseEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if baseVars[strings.ToUpper(name)] {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// tailBuffer keeps the last 8 KB written to it.
+type tailBuffer struct {
+	buf []byte
+}
+
+const tailSize = 8 << 10
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > tailSize {
+		t.buf = t.buf[len(t.buf)-tailSize:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) lastLines(n int) string {
+	lines := strings.Split(strings.TrimSpace(string(t.buf)), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " | ")
+}

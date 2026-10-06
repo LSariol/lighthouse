@@ -1,5 +1,7 @@
-// Package docker starts, stops and inspects containers through the host's
-// Docker daemon (the mounted /var/run/docker.sock).
+// Package docker talks to the host's Docker daemon (the mounted
+// /var/run/docker.sock): a compose project's containers, found by the labels
+// Compose puts on them; their state and output; and the images Lighthouse
+// keeps for rollback.
 package docker
 
 import (
@@ -7,11 +9,21 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
+	"sort"
 	"strconv"
+	"strings"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/client"
+)
+
+// The labels Compose puts on every container it creates.
+const (
+	projectLabel = "com.docker.compose.project"
+	serviceLabel = "com.docker.compose.service"
 )
 
 // Client is a Docker connection. Create it with New.
@@ -31,58 +43,222 @@ func New() (*Client, error) {
 
 func (c *Client) Close() error { return c.api.Close() }
 
-// IsNotFound reports whether err means there's no such container.
+// IsNotFound reports whether err means there's no such container or image.
 func IsNotFound(err error) bool {
 	return cerrdefs.IsNotFound(err)
 }
 
-func (c *Client) Start(ctx context.Context, name string) error {
-	_, err := c.api.ContainerStart(ctx, name, client.ContainerStartOptions{})
-	return err
+// Container is one container of a compose project.
+type Container struct {
+	ID      string
+	Name    string // without the leading "/"
+	Service string // the compose service it runs
+	State   string // "running", "exited", "restarting", ...
+	Health  string // "healthy", "unhealthy", "starting", or "" without a healthcheck
+	// ExitCode is the exit code of an exited container, else 0.
+	ExitCode int
+	ImageID  string
 }
 
-func (c *Client) Stop(ctx context.Context, name string) error {
-	_, err := c.api.ContainerStop(ctx, name, client.ContainerStopOptions{})
-	return err
-}
-
-func (c *Client) Restart(ctx context.Context, name string) error {
-	_, err := c.api.ContainerRestart(ctx, name, client.ContainerRestartOptions{})
-	return err
-}
-
-// State is a container's state as Docker reports it ("running", "exited",
-// ...), or "missing" when there's no such container.
-func (c *Client) State(ctx context.Context, name string) (string, error) {
-	result, err := c.api.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
-	if IsNotFound(err) {
-		return "missing", nil
-	}
+// ProjectContainers returns every container of the compose project, running
+// or not, sorted by service.
+func (c *Client) ProjectContainers(ctx context.Context, project string) ([]Container, error) {
+	result, err := c.api.ContainerList(ctx, client.ContainerListOptions{
+		All:     true,
+		Filters: client.Filters{}.Add("label", projectLabel+"="+project),
+	})
 	if err != nil {
-		return "", fmt.Errorf("inspect %q: %w", name, err)
+		return nil, fmt.Errorf("list containers of %s: %w", project, err)
 	}
-	if result.Container.State == nil {
-		return "", fmt.Errorf("inspect %q: Docker reported no state", name)
+
+	containers := make([]Container, 0, len(result.Items))
+	for _, s := range result.Items {
+		ct := Container{
+			ID:      s.ID,
+			Service: s.Labels[serviceLabel],
+			State:   string(s.State),
+			ImageID: s.ImageID,
+		}
+		if len(s.Names) > 0 {
+			ct.Name = strings.TrimPrefix(s.Names[0], "/")
+		}
+		if s.Health != nil && s.Health.Status != "none" {
+			ct.Health = string(s.Health.Status)
+		} else {
+			ct.Health = healthFromStatus(s.Status)
+		}
+		ct.ExitCode = exitCodeFromStatus(s.Status)
+		containers = append(containers, ct)
 	}
-	return string(result.Container.State.Status), nil
+	sort.Slice(containers, func(i, j int) bool {
+		if containers[i].Service != containers[j].Service {
+			return containers[i].Service < containers[j].Service
+		}
+		return containers[i].Name < containers[j].Name
+	})
+	return containers, nil
+}
+
+// healthFromStatus reads the health from Docker's status text, e.g.
+// "Up 3 minutes (healthy)", for daemons whose container list doesn't
+// report it separately.
+func healthFromStatus(status string) string {
+	switch {
+	case strings.Contains(status, "(healthy)"):
+		return "healthy"
+	case strings.Contains(status, "(unhealthy)"):
+		return "unhealthy"
+	case strings.Contains(status, "(health: starting)"):
+		return "starting"
+	}
+	return ""
+}
+
+var exitedStatus = regexp.MustCompile(`^Exited \((-?\d+)\)`)
+
+// exitCodeFromStatus reads the exit code from Docker's status text, e.g.
+// "Exited (1) 2 hours ago".
+func exitCodeFromStatus(status string) int {
+	if m := exitedStatus.FindStringSubmatch(status); m != nil {
+		code, _ := strconv.Atoi(m[1])
+		return code
+	}
+	return 0
+}
+
+// Detail is what a deploy checks about a container after starting it.
+type Detail struct {
+	State         string // "running", "exited", "restarting", ...
+	Health        string // "healthy", "unhealthy", "starting", or "" without a healthcheck
+	ExitCode      int
+	RestartCount  int
+	RestartPolicy string // "no", "always", "unless-stopped", "on-failure"
+	StartedAt     time.Time
+}
+
+// Inspect returns a container's state. (Docker's inspect also returns the
+// container's environment, which holds secrets; only these fields leave
+// this package.)
+func (c *Client) Inspect(ctx context.Context, id string) (Detail, error) {
+	result, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+	if err != nil {
+		return Detail{}, fmt.Errorf("inspect %s: %w", id, err)
+	}
+	info := result.Container
+	var d Detail
+	d.RestartCount = info.RestartCount
+	if info.HostConfig != nil {
+		d.RestartPolicy = string(info.HostConfig.RestartPolicy.Name)
+	}
+	if s := info.State; s != nil {
+		d.State = string(s.Status)
+		d.ExitCode = s.ExitCode
+		d.StartedAt, _ = time.Parse(time.RFC3339Nano, s.StartedAt)
+		if s.Health != nil && s.Health.Status != "none" {
+			d.Health = string(s.Health.Status)
+		}
+	}
+	return d, nil
+}
+
+func (c *Client) Start(ctx context.Context, id string) error {
+	_, err := c.api.ContainerStart(ctx, id, client.ContainerStartOptions{})
+	return err
+}
+
+func (c *Client) Stop(ctx context.Context, id string) error {
+	_, err := c.api.ContainerStop(ctx, id, client.ContainerStopOptions{})
+	return err
+}
+
+func (c *Client) Restart(ctx context.Context, id string) error {
+	_, err := c.api.ContainerRestart(ctx, id, client.ContainerRestartOptions{})
+	return err
 }
 
 // Logs returns the last tail lines of a container's output, stdout and
 // stderr combined.
-func (c *Client) Logs(ctx context.Context, name string, tail int) (string, error) {
-	rc, err := c.api.ContainerLogs(ctx, name, client.ContainerLogsOptions{
+func (c *Client) Logs(ctx context.Context, id string, tail int) (string, error) {
+	rc, err := c.api.ContainerLogs(ctx, id, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Tail:       strconv.Itoa(tail),
 	})
 	if err != nil {
-		return "", fmt.Errorf("logs %q: %w", name, err)
+		return "", fmt.Errorf("logs %s: %w", id, err)
 	}
 	defer rc.Close()
 
 	var output bytes.Buffer
 	if _, err := stdcopy.StdCopy(&output, &output, rc); err != nil && err != io.EOF {
-		return "", fmt.Errorf("logs %q: read: %w", name, err)
+		return "", fmt.Errorf("logs %s: read: %w", id, err)
 	}
 	return output.String(), nil
+}
+
+// ImageID returns the ID of the image ref names, or "" if there's none.
+func (c *Client) ImageID(ctx context.Context, ref string) (string, error) {
+	result, err := c.api.ImageInspect(ctx, ref)
+	if IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect image %s: %w", ref, err)
+	}
+	return result.ID, nil
+}
+
+// Tag gives the image source (an ID or a name) the name target.
+func (c *Client) Tag(ctx context.Context, source string, target string) error {
+	if _, err := c.api.ImageTag(ctx, client.ImageTagOptions{Source: source, Target: target}); err != nil {
+		return fmt.Errorf("tag %s as %s: %w", source, target, err)
+	}
+	return nil
+}
+
+// Tags returns the tags of repository (e.g. "website-web") that start with
+// prefix, e.g. "lh-".
+func (c *Client) Tags(ctx context.Context, repository string, prefix string) ([]string, error) {
+	result, err := c.api.ImageList(ctx, client.ImageListOptions{
+		Filters: client.Filters{}.Add("reference", repository+":"+prefix+"*"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list images of %s: %w", repository, err)
+	}
+	var tags []string
+	for _, img := range result.Items {
+		for _, ref := range img.RepoTags {
+			if name, tag, ok := strings.Cut(ref, ":"); ok && name == repository && strings.HasPrefix(tag, prefix) {
+				tags = append(tags, tag)
+			}
+		}
+	}
+	return tags, nil
+}
+
+// Untag removes the name ref. The image itself goes only when nothing else
+// names or uses it.
+func (c *Client) Untag(ctx context.Context, ref string) error {
+	_, err := c.api.ImageRemove(ctx, ref, client.ImageRemoveOptions{})
+	if err != nil && !IsNotFound(err) {
+		return fmt.Errorf("remove %s: %w", ref, err)
+	}
+	return nil
+}
+
+// PruneDangling removes images that have no name and no container: the ones
+// each rebuild leaves behind. Images kept for rollback have names.
+func (c *Client) PruneDangling(ctx context.Context) error {
+	_, err := c.api.ImagePrune(ctx, client.ImagePruneOptions{
+		Filters: client.Filters{}.Add("dangling", "true"),
+	})
+	return err
+}
+
+// PruneBuildCache removes build cache not used for the given time.
+func (c *Client) PruneBuildCache(ctx context.Context, unused time.Duration) error {
+	_, err := c.api.BuildCachePrune(ctx, client.BuildCachePruneOptions{
+		Filters: client.Filters{}.Add("until", unused.String()),
+	})
+	return err
 }

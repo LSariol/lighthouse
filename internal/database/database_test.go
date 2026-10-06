@@ -68,7 +68,7 @@ func TestMigrationsAreRepeatable(t *testing.T) {
 		t.Fatal(err)
 	}
 	have, want, _ := db.SchemaVersion(ctx)
-	if have != want || want < 2 {
+	if have != want || want < 3 {
 		t.Errorf("schema version %d, want %d", have, want)
 	}
 }
@@ -83,13 +83,15 @@ func TestGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.RecordDeployment(ctx, projects.Deployment{Project: "plop", Trigger: projects.TriggerCheck,
-		Status: projects.StatusFailed}); err != nil {
+		Status: projects.StatusFailed, Steps: []projects.Step{{Name: "fetch", Status: projects.StepFailed}}}); err != nil {
 		t.Fatalf("the app can't add history: %v", err)
 	}
 
 	denied := []string{
 		`UPDATE lighthouse.deployments SET error = 'rewritten'`,
 		`DELETE FROM lighthouse.deployments`,
+		`UPDATE lighthouse.deployment_steps SET log = 'rewritten'`,
+		`DELETE FROM lighthouse.deployment_steps`,
 		`CREATE TABLE lighthouse.sneaky (x int)`,
 		`CREATE TABLE public.sneaky (x int)`,
 		`DELETE FROM lighthouse.goose_db_version`,

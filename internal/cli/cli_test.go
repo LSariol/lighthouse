@@ -23,7 +23,8 @@ type fakeService struct {
 func newFake(names ...string) *fakeService {
 	f := &fakeService{failFor: map[string]bool{}}
 	for _, n := range names {
-		f.projects = append(f.projects, control.Project{Name: n, URL: "https://github.com/o/" + n, Container: n, State: "running"})
+		f.projects = append(f.projects, control.Project{Name: n, URL: "https://github.com/o/" + n, ComposeProject: n, State: "running",
+			Services: []control.ServiceStatus{{Name: "web", Container: n + "-web-1", State: "running", Health: "healthy"}}})
 	}
 	f.status = control.Status{Version: "v1", Env: "dev", Phase: "running", GitHubToken: true, Database: "reachable",
 		Schema: "version 2 (up to date)", StartedAt: time.Now(), Projects: f.projects}
@@ -43,9 +44,24 @@ func (f *fakeService) Projects(ctx context.Context) ([]control.Project, error) {
 	return f.projects, nil
 }
 func (f *fakeService) Add(ctx context.Context, name, url string) (control.Project, error) {
-	return control.Project{Name: name, URL: url, Container: name}, f.act("add", name)
+	return control.Project{Name: name, URL: url, ComposeProject: name}, f.act("add", name)
 }
-func (f *fakeService) Remove(ctx context.Context, name string) error { return f.act("remove", name) }
+func (f *fakeService) Remove(ctx context.Context, name string, down bool) error {
+	if down {
+		return f.act("remove --down", name)
+	}
+	return f.act("remove", name)
+}
+func (f *fakeService) Retry(ctx context.Context, name string) error { return f.act("retry", name) }
+func (f *fakeService) Report(ctx context.Context, name string, n int) (control.Deployment, error) {
+	start := time.Now().Add(-time.Hour)
+	return control.Deployment{Commit: "abcdef123", Trigger: "check", Status: "rolled_back", FailureKind: "permanent", FailedStep: "verify",
+		StartedAt: start, FinishedAt: start.Add(2 * time.Minute), Error: "verify: web is unhealthy; rolled back to 1111111",
+		Steps: []control.Step{
+			{Name: "build", Status: "succeeded", StartedAt: start, FinishedAt: start.Add(time.Minute), Log: "built website-web\n"},
+			{Name: "verify", Status: "failed", StartedAt: start, FinishedAt: start.Add(time.Minute), Log: "✗ web is unhealthy\n"},
+		}}, f.act("report", name)
+}
 func (f *fakeService) Rename(ctx context.Context, name, newName string) error {
 	return f.act("rename", name)
 }
@@ -65,8 +81,8 @@ func (f *fakeService) Logs(ctx context.Context, name string, lines int) (string,
 func (f *fakeService) History(ctx context.Context, name string, limit int) ([]control.Deployment, error) {
 	start := time.Now().Add(-time.Hour)
 	return []control.Deployment{
-		{Commit: "abcdef123", Trigger: "check", Status: "failed", StartedAt: start, FinishedAt: start.Add(90 * time.Second),
-			Error: "fetch secrets: missing: PLOP_DATABASE_URL\nmore detail"},
+		{Commit: "abcdef123", Trigger: "check", Status: "failed", FailedStep: "secrets", StartedAt: start, FinishedAt: start.Add(90 * time.Second),
+			Error: "secrets: missing: PLOP_DATABASE_URL\nmore detail"},
 	}, f.act("history", name)
 }
 
@@ -228,7 +244,7 @@ func TestStatus(t *testing.T) {
 		t.Errorf("out %q, err %q", out, errOut)
 	}
 
-	svc.status.Projects[0].State = "exited"
+	svc.status.Projects[0].State = "degraded"
 	svc.status.Projects[0].LastError = "GitHub: 404 Not Found"
 	_, _, err = run(t, svc, "status")
 	if err == nil || !strings.Contains(err.Error(), "2 things need attention") {
@@ -288,7 +304,7 @@ func TestHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"WHEN", "check", "failed", "abcdef1", "1m30s", "missing: PLOP_DATABASE_URL"} {
+	for _, want := range []string{"WHEN", "check", "failed at secrets", "abcdef1", "1m30s", "missing: PLOP_DATABASE_URL"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("history output lacks %q:\n%s", want, out)
 		}
@@ -336,5 +352,58 @@ func TestEmbeddedExit(t *testing.T) {
 	c.leave = func() { stopped = true }
 	if err := c.Exec(context.Background(), []string{"exit"}); err != nil || !stopped {
 		t.Errorf("exit: %v, stopped %v", err, stopped)
+	}
+}
+
+func TestRemoveDown(t *testing.T) {
+	svc := newFake("plop")
+	if _, _, err := run(t, svc, "remove plop --down --yes"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(svc.calls, ",") != "remove --down plop" {
+		t.Errorf("calls = %v", svc.calls)
+	}
+}
+
+func TestReport(t *testing.T) {
+	out, _, err := run(t, newFake("plop"), "report plop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"rolled back at verify", "counts toward broken", "== build: succeeded", "built website-web",
+		"== verify: failed", "✗ web is unhealthy", "rolled back to 1111111"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report lacks %q:\n%s", want, out)
+		}
+	}
+	var usage usageError
+	if _, _, err := run(t, newFake("plop"), "report plop zero"); !errors.As(err, &usage) {
+		t.Errorf("report with a bad number = %v", err)
+	}
+}
+
+func TestStatusShowsServicesAndBroken(t *testing.T) {
+	svc := newFake("plop")
+	out, _, err := run(t, svc, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "web") || !strings.Contains(out, "running, healthy") {
+		t.Errorf("status doesn't list the service:\n%s", out)
+	}
+
+	svc.status.Projects[0].Broken = true
+	svc.status.Projects[0].LastError = "broken after 3 failed deploys"
+	_, _, err = run(t, svc, "status")
+	if err == nil || !strings.Contains(err.Error(), "plop is broken") || !strings.Contains(err.Error(), "retry plop") {
+		t.Errorf("status of a broken project = %v", err)
+	}
+}
+
+func TestTargetCompletion(t *testing.T) {
+	c := New(newFake("plop"), Options{})
+	line, _, ok := c.complete("logs plop:", len("logs plop:"), '\t')
+	if !ok || line != "logs plop:web " {
+		t.Errorf("complete(logs plop:) = %q, %v", line, ok)
 	}
 }

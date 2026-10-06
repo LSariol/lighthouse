@@ -1,7 +1,8 @@
 // Package orchestrator decides when projects deploy: it checks GitHub for new
 // commits on a schedule, deploys the projects that changed, and runs deploys
-// asked for by the CLI. Every attempt is recorded in the projects.Store. It
-// grows into the v1.0.0 orchestrator (queue, backoff, reconcile loop).
+// asked for by the CLI. Every attempt is recorded in the projects.Store. A
+// commit that keeps failing for a reason retrying can't fix marks its project
+// broken, and isn't tried again until a new commit or `retry`.
 package orchestrator
 
 import (
@@ -14,17 +15,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LSariol/LightHouse/internal/deploy"
+	"github.com/LSariol/LightHouse/internal/github"
 	"github.com/LSariol/LightHouse/internal/projects"
 )
 
 // Deployer deploys a project. *deploy.Deployer implements it.
 type Deployer interface {
-	Deploy(ctx context.Context, p projects.Project) error
+	Deploy(ctx context.Context, req deploy.Request) deploy.Result
 }
 
 // Commits finds a repository's latest commit. github.Client implements it.
 type Commits interface {
-	LatestCommit(ctx context.Context, apiURL string, token string) (string, error)
+	LatestCommit(ctx context.Context, repo github.Repo, token string) (string, error)
 }
 
 // ErrScanRunning is returned by Scan when another scan is in progress.
@@ -101,59 +104,124 @@ func (o *Orchestrator) Scan(ctx context.Context) error {
 	return nil
 }
 
-// check looks up p's latest commit and deploys it if it's new. A failed
-// deploy doesn't change the deployed commit, so the next scan tries again.
+// ErrBroken means a project's latest commit failed BrokenAfter times and
+// isn't tried again until a new commit appears or `retry` clears it.
+var ErrBroken = errors.New("broken")
+
+// check looks up p's latest commit and deploys it if it's new, unless it's
+// the commit that made the project broken.
 func (o *Orchestrator) check(ctx context.Context, p projects.Project) error {
-	sha, err := o.commits.LatestCommit(ctx, p.Repo.APIURL(), o.gitToken)
-	if err == nil && sha != p.DeployedSHA {
+	sha, err := o.commits.LatestCommit(ctx, p.Repo, o.gitToken)
+	switch {
+	case err != nil:
+	case sha == p.DeployedSHA:
+	case p.Broken && sha == p.FailingSHA:
+		// Not tried again; the error stays the one that broke it.
+		return o.record(ctx, p.Name, nil, false)
+	default:
 		slog.Info("new commit", "project", p.Name, "sha", short(sha))
 		err = o.deploy(ctx, p, sha, projects.TriggerCheck)
 	}
+	return o.record(ctx, p.Name, err, true)
+}
 
-	if recErr := o.store.RecordCheck(ctx, p.Name, err); recErr != nil && !errors.Is(recErr, projects.ErrNotFound) {
-		// ErrNotFound: removed while it was being checked; nothing to record.
-		slog.Error("recording a check failed", "project", p.Name, "err", recErr)
+// record notes a check. With setError, err (or nil) becomes the last error.
+func (o *Orchestrator) record(ctx context.Context, name string, err error, setError bool) error {
+	var recErr error
+	if setError {
+		recErr = o.store.RecordCheck(ctx, name, err)
+	} else {
+		p, getErr := o.store.Get(ctx, name)
+		if getErr == nil {
+			recErr = o.store.RecordCheck(ctx, name, projects.ErrorString(p.LastError))
+		}
+	}
+	// ErrNotFound: removed while it was being checked; nothing to record.
+	if recErr != nil && !errors.Is(recErr, projects.ErrNotFound) {
+		slog.Error("recording a check failed", "project", name, "err", recErr)
 	}
 	return err
 }
 
-// Deploy deploys the project called name now, whether or not its commit
-// changed.
+// Deploy deploys the project called name now, at its latest commit, even if
+// it's the one deployed or the one that broke it.
 func (o *Orchestrator) Deploy(ctx context.Context, name string) error {
 	p, err := o.store.Get(ctx, name)
 	if err != nil {
 		return err
 	}
-
-	sha, err := o.commits.LatestCommit(ctx, p.Repo.APIURL(), o.gitToken)
+	sha, err := o.commits.LatestCommit(ctx, p.Repo, o.gitToken)
 	if err != nil {
 		return err
 	}
 	return o.deploy(ctx, p, sha, projects.TriggerManual)
 }
 
+// Retry clears a project's failures (and broken state) and deploys it now.
+func (o *Orchestrator) Retry(ctx context.Context, name string) error {
+	if err := o.store.ClearFailures(ctx, name); err != nil {
+		return err
+	}
+	return o.Deploy(ctx, name)
+}
+
 // deploy runs one deployment of p at sha and records it.
 func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, sha string, trigger string) error {
 	started := time.Now()
-	err := o.deployer.Deploy(ctx, p)
+	res := o.deployer.Deploy(ctx, deploy.Request{
+		Project: p,
+		SHA:     sha,
+		Token:   o.gitToken,
+		Claim: func(ctx context.Context, composeProject string) error {
+			err := o.store.SetComposeProject(ctx, p.Name, composeProject)
+			if errors.Is(err, projects.ErrComposeProjectTaken) {
+				return o.takenError(ctx, composeProject)
+			}
+			return err
+		},
+	})
 
 	d := projects.Deployment{
-		Project:    p.Name,
-		SHA:        sha,
-		Trigger:    trigger,
-		Status:     projects.StatusSucceeded,
-		StartedAt:  started,
-		FinishedAt: time.Now(),
+		Project:     p.Name,
+		SHA:         sha,
+		Trigger:     trigger,
+		Status:      res.Status,
+		FailureKind: res.FailureKind,
+		FailedStep:  res.FailedStep,
+		StartedAt:   started,
+		FinishedAt:  time.Now(),
+		Steps:       res.Steps,
 	}
-	if err != nil {
-		d.Status = projects.StatusFailed
-		d.Error = projects.ErrorText(err)
+	if res.Err != nil {
+		d.Error = projects.ErrorText(res.Err)
 	}
 	// A context cancelled by shutdown mustn't lose the record.
-	if recErr := o.store.RecordDeployment(context.WithoutCancel(ctx), d); recErr != nil && !errors.Is(recErr, projects.ErrNotFound) {
-		slog.Error("recording a deployment failed", "project", p.Name, "err", recErr)
+	if err := o.store.RecordDeployment(context.WithoutCancel(ctx), d); err != nil && !errors.Is(err, projects.ErrNotFound) {
+		slog.Error("recording a deployment failed", "project", p.Name, "err", err)
 	}
-	return err
+
+	if res.Err == nil {
+		return nil
+	}
+	if res.FailureKind == projects.FailurePermanent {
+		if now, err := o.store.Get(context.WithoutCancel(ctx), p.Name); err == nil && now.Broken {
+			slog.Warn("project is broken: its latest commit isn't tried again until a new one or `retry`",
+				"project", p.Name, "sha", short(sha), "failures", now.FailureCount)
+			return fmt.Errorf("%w after %d failed deploys of %s: %v", ErrBroken, now.FailureCount, short(sha), res.Err)
+		}
+	}
+	return res.Err
+}
+
+// takenError names the project that has a compose project already.
+func (o *Orchestrator) takenError(ctx context.Context, composeProject string) error {
+	list, _ := o.store.List(ctx)
+	for _, other := range list {
+		if other.ComposeProject == composeProject {
+			return fmt.Errorf("the compose project %q belongs to %s already: two projects can't share one (change `name:` in one compose file)", composeProject, other.Name)
+		}
+	}
+	return fmt.Errorf("the compose project %q belongs to another project", composeProject)
 }
 
 func short(sha string) string {

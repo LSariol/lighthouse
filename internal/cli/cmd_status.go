@@ -70,20 +70,30 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 		info("No projects are watched yet. Add one with \"add <name> <url>\".")
 	} else {
 		out("")
-		rows := [][]string{{"PROJECT", "CONTAINER", "STATE", "COMMIT", "DEPLOYED", "LAST CHECK"}}
+		rows := [][]string{{"PROJECT", "SERVICE", "STATE", "COMMIT", "DEPLOYED", "LAST CHECK"}}
 		for _, p := range s.Projects {
 			check := "ok"
-			if p.LastError != "" {
+			switch {
+			case p.Broken:
+				check = "broken"
+				problems = append(problems, fmt.Sprintf("%s is broken (\"report %s\", then \"retry %s\"): %s", p.Name, p.Name, p.Name, firstLine(p.LastError, 200)))
+			case p.LastError != "":
 				check = "failed " + ago(p.LastErrorAt)
-				problems = append(problems, fmt.Sprintf("%s: %s", p.Name, p.LastError))
-			}
-			if p.LastChecked == nil {
+				problems = append(problems, fmt.Sprintf("%s: %s", p.Name, firstLine(p.LastError, 200)))
+			case p.LastChecked == nil:
 				check = "-"
 			}
 			if p.State != "running" {
-				problems = append(problems, fmt.Sprintf("%s's container is %s", p.Name, p.State))
+				problems = append(problems, fmt.Sprintf("%s is %s", p.Name, p.State))
 			}
-			rows = append(rows, []string{p.Name, p.Container, p.State, shortSHA(p.Commit), ago(p.LastDeployed), check})
+			rows = append(rows, []string{p.Name, "", p.State, shortSHA(p.Commit), ago(p.LastDeployed), check})
+			for _, svc := range p.Services {
+				state := svc.State
+				if svc.Health != "" {
+					state += ", " + svc.Health
+				}
+				rows = append(rows, []string{"", svc.Name, state, "", "", ""})
+			}
 		}
 		table(rows)
 	}

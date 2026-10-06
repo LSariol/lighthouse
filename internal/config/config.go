@@ -19,8 +19,7 @@ import (
 type Config struct {
 	CoveURL       string        // COVE_URL: Cove's base URL, e.g. http://cove:2100
 	CoveTokenPath string        // COVE_TOKEN_PATH: where Lighthouse's Cove token is kept
-	StagingPath   string        // STAGING_PATH: where archives are unpacked; emptied on every deploy
-	DownloadPath  string        // DOWNLOAD_PATH: where archives are downloaded; emptied on every deploy
+	StagingPath   string        // STAGING_PATH: the deploy folders, <project>/<commit>; Lighthouse owns everything in it
 	Env           string        // APP_ENV: "dev" or "prod", shown in the shell's prompt
 	Version       string        // LIGHTHOUSE_VERSION: reported by status and version
 	ControlSocket string        // LIGHTHOUSE_CONTROL_SOCKET: where serve listens for the CLI
@@ -49,7 +48,6 @@ func Load() (Config, error) {
 		CoveURL:       env("COVE_URL"),
 		CoveTokenPath: env("COVE_TOKEN_PATH"),
 		StagingPath:   env("STAGING_PATH"),
-		DownloadPath:  env("DOWNLOAD_PATH"),
 		Env:           strings.ToLower(env("APP_ENV")),
 		Version:       env("LIGHTHOUSE_VERSION"),
 		ControlSocket: env("LIGHTHOUSE_CONTROL_SOCKET"),
@@ -90,7 +88,6 @@ func (c Config) ValidateServe() error {
 		{"COVE_URL", c.CoveURL},
 		{"COVE_TOKEN_PATH", c.CoveTokenPath},
 		{"STAGING_PATH", c.StagingPath},
-		{"DOWNLOAD_PATH", c.DownloadPath},
 	}
 	var missing []string
 	for _, r := range required {
@@ -113,10 +110,8 @@ func (c Config) ValidateServe() error {
 
 	// Both folders are emptied on every deploy, so a typo here could delete
 	// something important. Refuse anything that is obviously not a scratch folder.
-	for _, p := range []struct{ name, value string }{{"STAGING_PATH", c.StagingPath}, {"DOWNLOAD_PATH", c.DownloadPath}} {
-		if err := checkWorkFolder(p.value); err != nil {
-			return fmt.Errorf("%s %q: %v", p.name, p.value, err)
-		}
+	if err := checkWorkFolder(c.StagingPath); err != nil {
+		return fmt.Errorf("STAGING_PATH %q: %v", c.StagingPath, err)
 	}
 
 	if c.PollInterval < minPollInterval {

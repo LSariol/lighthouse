@@ -35,7 +35,7 @@ func Handler(svc Service) http.Handler {
 		respond(w, project, err)
 	})
 	mux.HandleFunc("DELETE /v1/projects/{name}", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, nil, svc.Remove(r.Context(), r.PathValue("name")))
+		respond(w, nil, svc.Remove(r.Context(), r.PathValue("name"), r.URL.Query().Get("down") == "true"))
 	})
 	mux.HandleFunc("POST /v1/projects/{name}/rename", func(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Name string }
@@ -54,6 +54,7 @@ func Handler(svc Service) http.Handler {
 
 	actions := map[string]func(context.Context, string) error{
 		"deploy":  svc.Deploy,
+		"retry":   svc.Retry,
 		"start":   svc.Start,
 		"stop":    svc.Stop,
 		"restart": svc.Restart,
@@ -74,6 +75,15 @@ func Handler(svc Service) http.Handler {
 		respond(w, logs, err)
 	})
 
+	mux.HandleFunc("GET /v1/projects/{name}/report", func(w http.ResponseWriter, r *http.Request) {
+		n, err := strconv.Atoi(r.URL.Query().Get("n"))
+		if err != nil {
+			respond(w, nil, Errorf(KindInvalid, "n must be a number"))
+			return
+		}
+		report, err := svc.Report(r.Context(), r.PathValue("name"), n)
+		respond(w, report, err)
+	})
 	mux.HandleFunc("GET /v1/projects/{name}/history", func(w http.ResponseWriter, r *http.Request) {
 		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
 		if err != nil {

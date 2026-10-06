@@ -126,8 +126,18 @@ func (c *Client) Add(ctx context.Context, name string, repoURL string) (Project,
 	return p, err
 }
 
-func (c *Client) Remove(ctx context.Context, name string) error {
-	return c.call(ctx, http.MethodDelete, project(name), nil, nil)
+func (c *Client) Remove(ctx context.Context, name string, down bool) error {
+	return c.call(ctx, http.MethodDelete, project(name)+"?down="+strconv.FormatBool(down), nil, nil)
+}
+
+func (c *Client) Retry(ctx context.Context, name string) error {
+	return c.call(ctx, http.MethodPost, project(name)+"/retry", nil, nil)
+}
+
+func (c *Client) Report(ctx context.Context, name string, n int) (Deployment, error) {
+	var d Deployment
+	err := c.call(ctx, http.MethodGet, project(name)+"/report?n="+strconv.Itoa(n), nil, &d)
+	return d, err
 }
 
 func (c *Client) Rename(ctx context.Context, name string, newName string) error {

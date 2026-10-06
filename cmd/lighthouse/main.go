@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/LSariol/LightHouse/internal/cli"
+	"github.com/LSariol/LightHouse/internal/compose"
 	"github.com/LSariol/LightHouse/internal/config"
 	"github.com/LSariol/LightHouse/internal/control"
 	"github.com/LSariol/LightHouse/internal/cove"
@@ -31,6 +32,10 @@ import (
 // retryEvery is how long startup waits before trying an unreachable Cove or
 // database again.
 const retryEvery = 15 * time.Second
+
+// shutdownWait is how long stopping waits for a deploy in progress. Keep it
+// under the compose file's stop_grace_period.
+const shutdownWait = 100 * time.Second
 
 func main() {
 	args := os.Args[1:]
@@ -100,7 +105,7 @@ func runServe(withShell bool) {
 	}
 	defer dockerClient.Close()
 
-	d := daemon.New(cfg, version, dockerClient)
+	d := daemon.New(cfg, version, dockerClient, compose.Runner{})
 
 	// The CLI can connect right away, so `status` shows startup progress
 	// while Lighthouse waits for Cove and the database.
@@ -138,10 +143,13 @@ func runServe(withShell bool) {
 	case <-ctx.Done():
 	}
 
+	// A deploy that already swapped finishes its check (or rollback) even
+	// though Lighthouse is stopping; docker-compose.yml gives it the time
+	// (stop_grace_period).
 	slog.Info("Lighthouse stopping")
 	select {
 	case <-loopDone:
-	case <-time.After(8 * time.Second):
+	case <-time.After(shutdownWait):
 		slog.Warn("a deploy was still running at shutdown")
 	}
 	<-controlDone
@@ -169,7 +177,12 @@ func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClien
 		return nil, nil, err
 	}
 
-	deployer := deploy.New(dockerClient, coveClient, cfg.StagingPath, cfg.DownloadPath)
+	// The archive download has no overall timeout of its own: the fetch
+	// step's deadline limits it. Commit checks are quick, so 30 seconds.
+	deployer := deploy.New(compose.Runner{}, dockerClient, github.Client{}, coveClient, deploy.Options{
+		Root: cfg.StagingPath,
+		Log:  os.Stderr,
+	})
 	commits := github.Client{HTTP: &http.Client{Timeout: 30 * time.Second}}
 	orch := orchestrator.New(db, commits, deployer, secrets.GitHubToken)
 	d.Ready(db, orch, db)

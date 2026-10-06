@@ -13,7 +13,7 @@ It's built for one person running their own projects on their own hardware: a ho
 ## What it does
 
 - **Watches your repos.** Every few seconds it checks whether `main` has a new commit.
-- **Deploys automatically.** New commit → download → `docker compose up --build`. Your project is running the new version a minute later.
+- **Deploys safely.** New commit → download → build → swap. Your old version keeps running while the new one builds, and if the new one doesn't come up healthy, the old one is put back. A commit that keeps failing is set aside until you push a fix.
 - **Keeps secrets out of your code.** Your project's `docker-compose.yml` names the secrets it needs, like `${MYAPP_DATABASE_URL}`. Lighthouse fetches them from [Cove](https://github.com/LSariol/Cove), a small self-hosted vault, at deploy time. Nothing secret lives in the repo or on disk, and your app only reads normal environment variables.
 - **Gives you a control panel.** A simple command prompt to list projects, see what's running, read logs, redeploy, see how past deploys went, or pause deploys.
 - **Remembers what happened.** Every deploy is recorded in a small Postgres database, so you can see when something changed and why a deploy failed.
@@ -42,8 +42,8 @@ Lighthouse, Cove and your apps all run as Docker containers on the same server, 
 
 Your repository needs:
 
-1. **A `docker-compose.yml`** at the top level that builds and runs it.
-2. **Its deployable code on `main`.**
+1. **A `docker-compose.yml`** at the top level that builds and runs it. It can have as many services as you like.
+2. **Its deployable code on `main`** (or whatever its default branch is). Private repositories work too.
 3. **Secrets written as placeholders.** Anything secret goes in as `${NAME}`, and you store the real value in Cove under that same name. Settings that aren't secret are just written out normally.
 
 ```yaml
@@ -71,7 +71,7 @@ Then tell Lighthouse about it:
 add myapp https://github.com/you/myapp
 ```
 
-That's it. The next push to `main` deploys it. The full list of rules (naming, storage folders, a few gotchas) is in [DOCUMENTATION.md §7](DOCUMENTATION.md#7-connecting-a-project-the-contract).
+That's it. The next push to `main` deploys it. A healthcheck on your services lets Lighthouse tell whether a new version really works before it keeps it. The full list of rules (naming, storage folders, a few gotchas) is in [DOCUMENTATION.md §7](DOCUMENTATION.md#7-connecting-a-project-the-contract).
 
 ---
 

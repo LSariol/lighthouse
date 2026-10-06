@@ -11,6 +11,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,14 +26,19 @@ import (
 	"github.com/LSariol/LightHouse/internal/projects"
 )
 
-// Containers starts, stops and inspects containers. *docker.Client
-// implements it.
+// Containers finds and controls a compose project's containers.
+// *docker.Client implements it.
 type Containers interface {
-	Start(ctx context.Context, name string) error
-	Stop(ctx context.Context, name string) error
-	Restart(ctx context.Context, name string) error
-	State(ctx context.Context, name string) (string, error)
-	Logs(ctx context.Context, name string, tail int) (string, error)
+	ProjectContainers(ctx context.Context, project string) ([]docker.Container, error)
+	Start(ctx context.Context, id string) error
+	Stop(ctx context.Context, id string) error
+	Restart(ctx context.Context, id string) error
+	Logs(ctx context.Context, id string, tail int) (string, error)
+}
+
+// Compose removes a compose project. compose.Runner implements it.
+type Compose interface {
+	Down(ctx context.Context, dir string, project string, out io.Writer) error
 }
 
 // Health reports on the database for `status`. *database.Database
@@ -50,13 +59,14 @@ const (
 
 const (
 	MaxLogLines     = 10000 // the most lines `logs` returns
-	MaxHistoryLimit = 100   // the most deployments `history` returns
+	MaxHistoryLimit = 100   // the most deployments `history` returns, and how far back `report` goes
 )
 
 type Daemon struct {
 	cfg        config.Config
 	version    string
 	containers Containers
+	compose    Compose
 	started    time.Time
 
 	mu           sync.RWMutex
@@ -66,8 +76,8 @@ type Daemon struct {
 	health       Health
 }
 
-func New(cfg config.Config, version string, c Containers) *Daemon {
-	return &Daemon{cfg: cfg, version: version, containers: c, started: time.Now(), phase: PhaseStarting}
+func New(cfg config.Config, version string, c Containers, cmp Compose) *Daemon {
+	return &Daemon{cfg: cfg, version: version, containers: c, compose: cmp, started: time.Now(), phase: PhaseStarting}
 }
 
 // SetPhase records how far startup has got.
@@ -130,19 +140,46 @@ func (d *Daemon) Status(ctx context.Context) (control.Status, error) {
 		s.Schema = fmt.Sprintf("version %d (up to date)", have)
 	}
 
-	projects, err := d.Projects(ctx)
+	list, err := d.Projects(ctx)
 	if err != nil {
 		return s, err
 	}
-	for i := range projects {
-		state, err := d.containers.State(ctx, projects[i].Container)
-		if err != nil {
-			state = "unknown"
-		}
-		projects[i].State = state
+	for i := range list {
+		d.addServices(ctx, &list[i])
 	}
-	s.Projects = projects
+	s.Projects = list
 	return s, nil
+}
+
+// addServices fills in a project's services and sums up its state.
+func (d *Daemon) addServices(ctx context.Context, p *control.Project) {
+	cs, err := d.containers.ProjectContainers(ctx, p.ComposeProject)
+	if err != nil {
+		p.State = "unknown"
+		return
+	}
+	up, down := 0, 0
+	for _, c := range cs {
+		p.Services = append(p.Services, control.ServiceStatus{Name: c.Service, Container: c.Name, State: c.State, Health: c.Health})
+		switch {
+		case c.State == "running" && c.Health != "unhealthy":
+			up++
+		case c.State == "exited" && c.ExitCode == 0:
+			// A one-off job that finished: neither up nor a problem.
+		default:
+			down++
+		}
+	}
+	switch {
+	case len(cs) == 0:
+		p.State = "missing"
+	case down == 0:
+		p.State = "running"
+	case up == 0:
+		p.State = "stopped"
+	default:
+		p.State = "degraded"
+	}
 }
 
 func (d *Daemon) Projects(ctx context.Context) ([]control.Project, error) {
@@ -163,16 +200,18 @@ func (d *Daemon) Projects(ctx context.Context) ([]control.Project, error) {
 
 func toProject(p projects.Project) control.Project {
 	return control.Project{
-		Name:          p.Name,
-		URL:           p.Repo.URL(),
-		Container:     p.Container(),
-		Commit:        p.DeployedSHA,
-		WatchingSince: p.CreatedAt,
-		LastDeployed:  p.DeployedAt,
-		LastChecked:   p.LastCheckedAt,
-		Checks:        int(p.Checks),
-		LastError:     p.LastError,
-		LastErrorAt:   p.LastErrorAt,
+		Name:           p.Name,
+		URL:            p.Repo.URL(),
+		ComposeProject: p.ComposeName(),
+		Commit:         p.DeployedSHA,
+		WatchingSince:  p.CreatedAt,
+		LastDeployed:   p.DeployedAt,
+		LastChecked:    p.LastCheckedAt,
+		Checks:         int(p.Checks),
+		LastError:      p.LastError,
+		LastErrorAt:    p.LastErrorAt,
+		FailureCount:   p.FailureCount,
+		Broken:         p.Broken,
 	}
 }
 
@@ -192,12 +231,25 @@ func (d *Daemon) Add(ctx context.Context, name string, url string) (control.Proj
 	return toProject(p), nil
 }
 
-func (d *Daemon) Remove(ctx context.Context, name string) error {
+func (d *Daemon) Remove(ctx context.Context, name string, down bool) error {
 	store, _, err := d.parts()
 	if err != nil {
 		return err
 	}
-	return projectError(store.Remove(ctx, name), name, "")
+	p, err := d.find(ctx, name)
+	if err != nil {
+		return err
+	}
+	if down {
+		// Down needs a folder without a compose file to run in.
+		dir := d.cfg.StagingPath
+		os.MkdirAll(dir, 0o755)
+		var out strings.Builder
+		if err := d.compose.Down(ctx, dir, p.ComposeName(), &out); err != nil {
+			return control.Errorf(control.KindInternal, "Couldn't remove %s's containers (compose project %q): %v. Nothing was changed; it's still watched.", p.Name, p.ComposeName(), err)
+		}
+	}
+	return projectError(store.Remove(ctx, p.Name), name, "")
 }
 
 func (d *Daemon) Rename(ctx context.Context, name string, newName string) error {
@@ -265,10 +317,25 @@ func (d *Daemon) Deploy(ctx context.Context, name string) error {
 	if _, err := d.find(ctx, name); err != nil {
 		return err
 	}
-	if err := o.Deploy(ctx, name); err != nil {
-		return control.Errorf(control.KindInternal, "Deploying %s failed: %v. \"history %s\" lists the attempts; \"docker logs lighthouse\" has the full output.", name, err, name)
+	return deployError(name, o.Deploy(ctx, name))
+}
+
+func (d *Daemon) Retry(ctx context.Context, name string) error {
+	_, o, err := d.parts()
+	if err != nil {
+		return err
 	}
-	return nil
+	if _, err := d.find(ctx, name); err != nil {
+		return err
+	}
+	return deployError(name, o.Retry(ctx, name))
+}
+
+func deployError(name string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return control.Errorf(control.KindInternal, "Deploying %s failed: %v. \"report %s\" shows each step's output.", name, err, name)
 }
 
 func (d *Daemon) Scan(ctx context.Context) error {
@@ -318,67 +385,131 @@ func (d *Daemon) History(ctx context.Context, name string, limit int) ([]control
 	}
 	out := make([]control.Deployment, 0, len(history))
 	for _, h := range history {
-		out = append(out, control.Deployment{
-			Commit: h.SHA, Trigger: h.Trigger, Status: h.Status,
-			StartedAt: h.StartedAt, FinishedAt: h.FinishedAt, Error: h.Error,
-		})
+		out = append(out, toDeployment(h))
 	}
 	return out, nil
 }
 
-func (d *Daemon) Start(ctx context.Context, name string) error {
-	return d.containerAction(ctx, name, "start", d.containers.Start)
+func (d *Daemon) Report(ctx context.Context, name string, n int) (control.Deployment, error) {
+	if n < 1 || n > MaxHistoryLimit {
+		return control.Deployment{}, control.Errorf(control.KindInvalid, "The deploy number must be between 1 (the latest) and %d.", MaxHistoryLimit)
+	}
+	store, _, err := d.parts()
+	if err != nil {
+		return control.Deployment{}, err
+	}
+	dep, err := store.Deployment(ctx, name, n)
+	if errors.Is(err, projects.ErrNoDeployment) {
+		return control.Deployment{}, control.Errorf(control.KindNotFound, "%s has fewer than %d deploys. \"history %s\" lists them.", name, n, name)
+	}
+	if err != nil {
+		return control.Deployment{}, projectError(err, name, "")
+	}
+	out := toDeployment(dep)
+	for _, st := range dep.Steps {
+		out.Steps = append(out.Steps, control.Step{Name: st.Name, Status: st.Status, StartedAt: st.StartedAt, FinishedAt: st.FinishedAt, Log: st.Log})
+	}
+	return out, nil
 }
 
-func (d *Daemon) Stop(ctx context.Context, name string) error {
-	return d.containerAction(ctx, name, "stop", d.containers.Stop)
+func toDeployment(d projects.Deployment) control.Deployment {
+	return control.Deployment{
+		Commit: d.SHA, Trigger: d.Trigger, Status: d.Status, FailureKind: d.FailureKind, FailedStep: d.FailedStep,
+		StartedAt: d.StartedAt, FinishedAt: d.FinishedAt, Error: d.Error,
+	}
 }
 
-func (d *Daemon) Restart(ctx context.Context, name string) error {
-	return d.containerAction(ctx, name, "restart", d.containers.Restart)
+func (d *Daemon) Start(ctx context.Context, target string) error {
+	return d.containerAction(ctx, target, "start", d.containers.Start)
 }
 
-// containerAction runs fn on a project's container. Only watched projects'
-// containers can be controlled, never other containers on the host.
-func (d *Daemon) containerAction(ctx context.Context, name string, verb string, fn func(context.Context, string) error) error {
+func (d *Daemon) Stop(ctx context.Context, target string) error {
+	return d.containerAction(ctx, target, "stop", d.containers.Stop)
+}
+
+func (d *Daemon) Restart(ctx context.Context, target string) error {
+	return d.containerAction(ctx, target, "restart", d.containers.Restart)
+}
+
+// targets resolves "<project>" (every container) or "<project>:<service>"
+// (that service's) to containers. Only watched projects' containers can be
+// reached, never other containers on the host.
+func (d *Daemon) targets(ctx context.Context, target string) (projects.Project, []docker.Container, error) {
+	name, service, hasService := strings.Cut(target, ":")
 	p, err := d.find(ctx, name)
+	if err != nil {
+		return p, nil, err
+	}
+
+	all, err := d.containers.ProjectContainers(ctx, p.ComposeName())
+	if err != nil {
+		return p, nil, fmt.Errorf("Docker: %w", err)
+	}
+	if len(all) == 0 {
+		return p, nil, control.Errorf(control.KindNotFound, "%s has no containers (compose project %q). \"deploy %s\" starts it.", p.Name, p.ComposeName(), p.Name)
+	}
+	if !hasService {
+		return p, all, nil
+	}
+
+	var picked []docker.Container
+	services := map[string]bool{}
+	for _, c := range all {
+		services[c.Service] = true
+		if c.Service == service {
+			picked = append(picked, c)
+		}
+	}
+	if len(picked) == 0 {
+		names := make([]string, 0, len(services))
+		for s := range services {
+			names = append(names, s)
+		}
+		sort.Strings(names)
+		return p, nil, control.Errorf(control.KindNotFound, "%s has no service %q. Its services: %s.", p.Name, service, strings.Join(names, ", "))
+	}
+	return p, picked, nil
+}
+
+func (d *Daemon) containerAction(ctx context.Context, target string, verb string, fn func(context.Context, string) error) error {
+	p, cs, err := d.targets(ctx, target)
 	if err != nil {
 		return err
 	}
-
-	if err := fn(ctx, p.Container()); err != nil {
-		if docker.IsNotFound(err) {
-			return control.Errorf(control.KindNotFound, "%s", missingContainer(p))
+	var failed []string
+	for _, c := range cs {
+		if err := fn(ctx, c.ID); err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%v)", c.Service, err))
 		}
-		return control.Errorf(control.KindInternal, "Couldn't %s %s: %v", verb, p.Name, err)
+	}
+	if len(failed) > 0 {
+		return control.Errorf(control.KindInternal, "Couldn't %s %s: %s", verb, p.Name, strings.Join(failed, "; "))
 	}
 	return nil
 }
 
-func (d *Daemon) Logs(ctx context.Context, name string, lines int) (string, error) {
+func (d *Daemon) Logs(ctx context.Context, target string, lines int) (string, error) {
 	if lines < 1 || lines > MaxLogLines {
 		return "", control.Errorf(control.KindInvalid, "Lines must be between 1 and %d.", MaxLogLines)
 	}
-	p, err := d.find(ctx, name)
+	p, cs, err := d.targets(ctx, target)
 	if err != nil {
 		return "", err
 	}
 
-	logs, err := d.containers.Logs(ctx, p.Container(), lines)
-	if err != nil {
-		if docker.IsNotFound(err) {
-			return "", control.Errorf(control.KindNotFound, "%s", missingContainer(p))
+	var b strings.Builder
+	for _, c := range cs {
+		logs, err := d.containers.Logs(ctx, c.ID, lines)
+		if err != nil {
+			return "", fmt.Errorf("logs of %s:%s: %w", p.Name, c.Service, err)
 		}
-		return "", fmt.Errorf("logs for %s: %w", p.Name, err)
+		if len(cs) > 1 {
+			fmt.Fprintf(&b, "==> %s:%s <==\n", p.Name, c.Service)
+		}
+		b.WriteString(logs)
+		if len(cs) > 1 && logs != "" && !strings.HasSuffix(logs, "\n") {
+			b.WriteString("\n")
+		}
 	}
-	return logs, nil
-}
-
-// missingContainer explains why a project's container wasn't found. Until
-// compose projects are read from the compose file (DOCUMENTATION.md 16.9),
-// Lighthouse looks for one container named after the repository.
-func missingContainer(p projects.Project) string {
-	return fmt.Sprintf("There's no container named %q (%s's repository name, which is where Lighthouse looks for now). "+
-		"Either %s hasn't been deployed yet (\"deploy %s\"), or its compose file names its containers differently or has several, "+
-		"which Lighthouse doesn't handle yet: use docker compose on the server for those.", p.Container(), p.Name, p.Name, p.Name)
+	return b.String(), nil
 }

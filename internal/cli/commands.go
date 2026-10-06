@@ -86,6 +86,8 @@ func commandTable(embedded bool) []command {
 	yes := flag{"--yes, -y", "Don't ask for confirmation (for scripts)."}
 	names := (*CLI).projectNames
 	namesOrAll := (*CLI).projectNamesOrAll
+	targets := (*CLI).projectTargets
+	targetsOrAll := (*CLI).projectTargetsOrAll
 
 	return []command{
 		{
@@ -115,12 +117,16 @@ func commandTable(embedded bool) []command {
 			synopsis: "<name>",
 			summary:  "Stop watching a project",
 			usages: []usage{
-				{"remove <name>", "Stop watching a project. Asks first. Its container keeps running; stop it first if it should go too."},
+				{"remove <name>", "Stop watching a project. Asks first. Its containers keep running."},
+				{"remove <name> --down", "Also stop and remove its containers (docker compose down)."},
 			},
-			flags: []flag{yes},
+			flags: []flag{
+				{"--down", "Stop and remove its containers too."},
+				yes,
+			},
 			examples: []example{
-				{"remove plop", "asks first"},
-				{"remove plop --yes", "no question"},
+				{"remove plop", "asks first; plop keeps running"},
+				{"remove plop --down --yes", "gone, no question"},
 			},
 			run:      (*CLI).remove,
 			complete: names,
@@ -131,9 +137,9 @@ func commandTable(embedded bool) []command {
 			synopsis: "<name> <new-name>",
 			summary:  "Change a project's name in Lighthouse",
 			usages: []usage{
-				{"rename <name> <new-name>", "Change the name Lighthouse uses for a project. The repository and container are unchanged."},
+				{"rename <name> <new-name>", "Change the name Lighthouse uses for a project. Its repository and containers are unchanged."},
 			},
-			examples: []example{{"rename Plop plop", "lowercase it"}},
+			examples: []example{{"rename landing personalWebsite", "a clearer name"}},
 			run:      (*CLI).rename,
 			complete: names,
 		},
@@ -143,7 +149,7 @@ func commandTable(embedded bool) []command {
 			synopsis: "<name> <url>",
 			summary:  "Point a project at another repository",
 			usages: []usage{
-				{"set-url <name> <url>", "Watch a different repository under the same name, e.g. after renaming it on GitHub. Its container name follows the new repository's name."},
+				{"set-url <name> <url>", "Watch a different repository under the same name, e.g. after renaming it on GitHub. It deploys on the next check."},
 			},
 			examples: []example{{"set-url plop https://github.com/LSariol/plop-web", "after a rename on GitHub"}},
 			run:      (*CLI).setURL,
@@ -155,7 +161,7 @@ func commandTable(embedded bool) []command {
 			synopsis: "<name|all>",
 			summary:  "Deploy the latest commit now",
 			usages: []usage{
-				{"deploy <name>", "Download, build and start a project's latest commit now, even if it hasn't changed. Waits until it's done, which can take a few minutes."},
+				{"deploy <name>", "Build and start a project's latest commit now, even if it's already deployed or broken. The running version keeps serving until the new one is built; if the new one doesn't come up, the old one is put back. Waits until it's done."},
 				{"deploy all", "Deploy every project, one after another. Asks first."},
 			},
 			flags: []flag{{"--yes, -y", "deploy all: don't ask for confirmation."}},
@@ -167,18 +173,45 @@ func commandTable(embedded bool) []command {
 			complete: namesOrAll,
 		},
 		{
+			names:    []string{"retry"},
+			group:    groupDeploying,
+			synopsis: "<name>",
+			summary:  "Clear a broken project and deploy it again",
+			usages: []usage{
+				{"retry <name>", "A project whose latest commit failed 3 times is broken: Lighthouse waits for a new commit. retry clears that and deploys it now, e.g. after fixing a secret in Cove."},
+			},
+			examples: []example{{"retry plop", "after creating the missing secret"}},
+			run:      (*CLI).retry,
+			complete: names,
+		},
+		{
 			names:    []string{"history"},
 			group:    groupDeploying,
 			synopsis: "<name> [count]",
 			summary:  "A project's recent deploys and how they went",
 			usages: []usage{
-				{"history <name> [count]", "List a project's most recent deploys (10 unless given, up to 100), newest first: when, what started it, the commit, how long it took, and why it failed."},
+				{"history <name> [count]", "List a project's most recent deploys (10 unless given, up to 100), newest first: when, what started it, the result and the step that failed, the commit, how long it took, and the error."},
 			},
 			examples: []example{
 				{"history plop", "the last 10"},
 				{"history plop 50", "the last 50"},
 			},
 			run:      (*CLI).history,
+			complete: names,
+		},
+		{
+			names:    []string{"report"},
+			group:    groupDeploying,
+			synopsis: "<name> [n]",
+			summary:  "One deploy in detail: each step and its output",
+			usages: []usage{
+				{"report <name> [n]", "Show a deploy step by step, with each step's output (secret values hidden): the latest unless n is given (2 is the one before, as in history)."},
+			},
+			examples: []example{
+				{"report plop", "why did the last deploy fail?"},
+				{"report plop 2", "the one before"},
+			},
+			run:      (*CLI).report,
 			complete: names,
 		},
 		{
@@ -208,68 +241,78 @@ func commandTable(embedded bool) []command {
 		{
 			names:    []string{"start"},
 			group:    groupContainers,
-			synopsis: "<name|all>",
-			summary:  "Start a project's container",
+			synopsis: "<name[:service]|all>",
+			summary:  "Start a project's containers",
 			usages: []usage{
-				{"start <name>", "Start a project's stopped container (the version already built)."},
-				{"start all", "Start every project's container."},
+				{"start <name>", "Start every container of a project (the version already built)."},
+				{"start <name>:<service>", "Start one service's container."},
+				{"start all", "Start every project's containers."},
 			},
-			examples: []example{{"start plop", "bring it back after \"stop\""}},
+			examples: []example{
+				{"start plop", "bring it back after \"stop\""},
+				{"start personalWebsite:bot", "just the bot"},
+			},
 			run:      (*CLI).start,
-			complete: namesOrAll,
+			complete: targetsOrAll,
 		},
 		{
 			names:    []string{"stop"},
 			group:    groupContainers,
-			synopsis: "<name|all>",
-			summary:  "Stop a project's container",
+			synopsis: "<name[:service]|all>",
+			summary:  "Stop a project's containers",
 			usages: []usage{
-				{"stop <name>", "Stop a project's container; it's offline until started or deployed again. Asks first."},
-				{"stop all", "Stop every project's container. Asks first."},
+				{"stop <name>", "Stop every container of a project; it's offline until started or deployed again. Asks first."},
+				{"stop <name>:<service>", "Stop one service's container. Asks first."},
+				{"stop all", "Stop every project's containers. Asks first."},
 			},
 			flags: []flag{yes},
 			examples: []example{
 				{"stop plop", "asks first"},
-				{"stop all --yes", "everything, no question"},
+				{"stop personalWebsite:bot --yes", "just the bot, no question"},
 			},
 			run:      (*CLI).stop,
-			complete: namesOrAll,
+			complete: targetsOrAll,
 		},
 		{
 			names:    []string{"restart"},
 			group:    groupContainers,
-			synopsis: "<name|all>",
-			summary:  "Restart a project's container",
+			synopsis: "<name[:service]|all>",
+			summary:  "Restart a project's containers",
 			usages: []usage{
-				{"restart <name>", "Restart a project's container (the version already built). For a new commit or changed secrets, use \"deploy\"."},
-				{"restart all", "Restart every project's container. Asks first."},
+				{"restart <name>", "Restart every container of a project (the version already built). For a new commit or changed secrets, use \"deploy\"."},
+				{"restart <name>:<service>", "Restart one service's container."},
+				{"restart all", "Restart every project's containers. Asks first."},
 			},
-			flags:    []flag{{"--yes, -y", "restart all: don't ask for confirmation."}},
-			examples: []example{{"restart plop", "a quick restart"}},
+			flags: []flag{{"--yes, -y", "restart all: don't ask for confirmation."}},
+			examples: []example{
+				{"restart plop", "a quick restart"},
+				{"restart personalWebsite:web", "just the web service"},
+			},
 			run:      (*CLI).restart,
-			complete: namesOrAll,
+			complete: targetsOrAll,
 		},
 		{
 			names:    []string{"logs"},
 			group:    groupContainers,
-			synopsis: "<name> [lines]",
+			synopsis: "<name[:service]> [lines]",
 			summary:  "A project's recent output",
 			usages: []usage{
-				{"logs <name> [lines]", "Show the last lines of a project's container output (50 unless given, up to 10000)."},
+				{"logs <name> [lines]", "Show the last lines of each of a project's containers (50 unless given, up to 10000)."},
+				{"logs <name>:<service> [lines]", "Show one service's last lines."},
 			},
 			examples: []example{
 				{"logs plop", "the last 50 lines"},
-				{"logs plop 500", "the last 500"},
+				{"logs personalWebsite:bot 500", "the bot's last 500"},
 			},
 			run:      (*CLI).logs,
-			complete: names,
+			complete: targets,
 		},
 		{
 			names:   []string{"status"},
 			group:   groupLighthouse,
 			summary: "Is everything healthy?",
 			usages: []usage{
-				{"status", "Show Lighthouse's health (version, startup, Cove, GitHub token, database, automatic deploys) and every project's container state and last error. Exits non-zero if something needs attention."},
+				{"status", "Show Lighthouse's health (version, startup, Cove, GitHub token, database, automatic deploys) and every project's services, their state and health, and its last check. Exits non-zero if something needs attention."},
 			},
 			run: (*CLI).status,
 		},
@@ -277,7 +320,7 @@ func commandTable(embedded bool) []command {
 			names:    []string{"help", "h"},
 			group:    groupLighthouse,
 			synopsis: "[command|guide]",
-			summary:  "This overview, one command in detail, or a guide",
+			summary:  "This overview, one command, or a guide",
 			usages: []usage{
 				{"help", "List every command."},
 				{"help <command>", "Show one command in detail, with examples."},
@@ -308,10 +351,14 @@ var guides = []struct {
 
 const setupGuide = `Getting a repository ready for Lighthouse (e.g. "plop")
 
-1. A docker-compose.yml at the top of the repository, with:
-     name: plop                  the repository's name, lowercase
-     container_name: plop        on its main service, the same name
+1. A compose file at the top of the repository (docker-compose.yml or
+   compose.yaml). Lighthouse runs every service in it.
+     name: plop                  the compose project; the repository's
+                                 name (lowercase) if there's none
      networks: [spark]           external; to reach Cove, sparkdb, others
+   Give anything on spark a name no other project uses (a container_name,
+   or a network alias such as plop-web): names on a shared network
+   answer for every container that has them.
    Data that must survive a deploy goes in an absolute host path,
    /srv/server/storage/plop/..., never a relative ./folder.
 
@@ -320,38 +367,45 @@ const setupGuide = `Getting a repository ready for Lighthouse (e.g. "plop")
        - DATABASE_URL=${PLOP_DATABASE_URL}
        - LOG_LEVEL=info          plain settings are written out
    Create each key in Cove first ("create PLOP_DATABASE_URL ..." in the
-   Cove shell). Only real secrets go in ${...}: Lighthouse fetches every
-   placeholder from Cove, and a missing key fails the deploy.
+   Cove shell). A ${KEY} without a default is fetched from Cove, and a
+   missing key fails the deploy; one with a default isn't fetched.
 
-3. The deployable code on main. Lighthouse deploys every new commit there.
+3. A healthcheck in the compose file for anything that serves: Lighthouse
+   waits until it's healthy, and puts the old version back if it isn't.
+   Without one, a service only has to stay up for 10 seconds.
 
-4. Add it:
+4. Add it, under any name you like:
      add plop https://github.com/LSariol/plop
-   Then "status" shows it running within a minute or two, and "logs plop"
-   shows its output.
+   Lighthouse deploys the default branch's latest commit within a check.
+   "status" shows each service; "logs plop:web" one service's output.
 
 The full rules: DOCUMENTATION.md §7 in the Lighthouse repository.`
 
 const failedGuide = `When a deploy fails
 
-1. See why: "list" shows each project's last error; "docker logs lighthouse"
-   (on the server) has the full build output.
+1. Nothing went down: the running version keeps serving until the new one
+   is built, and if the new one doesn't come up healthy, the old one is put
+   back ("rolled back" in history).
 
-2. The project is probably stopped: today Lighthouse stops the old container
-   before building the new one. "start <name>" brings the old version back
-   while you fix it.
+2. See why: "report <name>" shows each step of the last deploy with its
+   output; "history <name>" lists the recent ones.
 
-3. Lighthouse retries the deploy on every check until it succeeds. To stop
-   that while you work on it: "pause". Afterwards: "resume".
+3. What Lighthouse does next:
+     a problem with GitHub, Cove or the network: tries again next check
+     a problem with the commit itself: tries again, and after 3 failures
+     of the same commit the project is broken: no more tries until a new
+     commit arrives, or "retry <name>"
 
 4. Common causes:
      missing: KEY             the secret isn't in Cove, or its name changed
      forbidden_key            Lighthouse's Cove token can't read the key
-     docker compose ... failed the Dockerfile or compose file has an error
-     no such file             the compose file isn't at the repository's top
+     build failed             the Dockerfile has an error ("report" shows it)
+     unhealthy / stopped      the new version doesn't start properly
+     belongs to <project>     two compose files use the same name:
      GitHub: 401              Lighthouse's GitHub token expired or was revoked
 
-5. Fix, push to main, then "deploy <name>" (or wait for the next check).`
+5. Fix it and push (it deploys on the next check), or, for a fix outside
+   the repository such as a secret in Cove: "retry <name>".`
 
 // help shows the overview, one command in detail, or a guide.
 func (c *CLI) help(ctx context.Context, args []string) error {

@@ -9,7 +9,7 @@ import (
 
 func (c *CLI) start(ctx context.Context, args []string) error {
 	if len(args) != 2 {
-		return usageError{form: "start <name|all>"}
+		return usageError{form: "start <name[:service]|all>"}
 	}
 	if strings.EqualFold(args[1], "all") {
 		return c.eachProject(ctx, "start", "Started", c.svc.Start)
@@ -24,7 +24,7 @@ func (c *CLI) start(ctx context.Context, args []string) error {
 func (c *CLI) stop(ctx context.Context, args []string) error {
 	skip, rest := takeYesFlag(args[1:])
 	if len(rest) != 1 {
-		return usageError{form: "stop <name|all> [--yes]"}
+		return usageError{form: "stop <name[:service]|all> [--yes]"}
 	}
 
 	if strings.EqualFold(rest[0], "all") {
@@ -49,7 +49,7 @@ func (c *CLI) stop(ctx context.Context, args []string) error {
 func (c *CLI) restart(ctx context.Context, args []string) error {
 	skip, rest := takeYesFlag(args[1:])
 	if len(rest) != 1 {
-		return usageError{form: "restart <name|all> [--yes]"}
+		return usageError{form: "restart <name[:service]|all> [--yes]"}
 	}
 
 	if strings.EqualFold(rest[0], "all") {
@@ -71,14 +71,14 @@ const defaultLogLines = 50
 
 func (c *CLI) logs(ctx context.Context, args []string) error {
 	if len(args) < 2 || len(args) > 3 {
-		return usageError{form: "logs <name> [lines]"}
+		return usageError{form: "logs <name[:service]> [lines]"}
 	}
 
 	lines := defaultLogLines
 	if len(args) == 3 {
 		n, err := strconv.Atoi(args[2])
 		if err != nil || n < 1 {
-			return usageError{reason: fmt.Sprintf("%q isn't a positive number of lines.", args[2]), form: "logs <name> [lines]"}
+			return usageError{reason: fmt.Sprintf("%q isn't a positive number of lines.", args[2]), form: "logs <name[:service]> [lines]"}
 		}
 		lines = n
 	}

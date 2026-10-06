@@ -3,50 +3,65 @@ package orchestrator
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/LSariol/LightHouse/internal/deploy"
 	"github.com/LSariol/LightHouse/internal/github"
 	"github.com/LSariol/LightHouse/internal/projects"
 	"github.com/LSariol/LightHouse/internal/projects/projectstest"
 )
 
-// fakeCommits answers with a fixed commit per repository name; others fail.
+// fakeCommits answers with a commit per repository name; others fail.
 type fakeCommits map[string]string
 
-func (f fakeCommits) LatestCommit(ctx context.Context, apiURL string, token string) (string, error) {
+func (f fakeCommits) LatestCommit(ctx context.Context, repo github.Repo, token string) (string, error) {
 	if token == "" {
 		return "", errors.New("no token")
 	}
-	for name, sha := range f {
-		if strings.HasSuffix(apiURL, "/"+name) {
-			return sha, nil
-		}
+	if sha, ok := f[repo.Name]; ok {
+		return sha, nil
 	}
 	return "", errors.New("GitHub: 404 Not Found")
 }
 
-// fakeDeployer records deploys and fails for the names in fail.
+// fakeDeployer records deploys; result decides how each goes (success if nil).
 type fakeDeployer struct {
 	mu       sync.Mutex
-	deployed []string
-	fail     map[string]bool
-	during   func(p projects.Project) // runs inside each deploy
+	deployed []string // "name@sha"
+	result   func(req deploy.Request) deploy.Result
 }
 
-func (f *fakeDeployer) Deploy(ctx context.Context, p projects.Project) error {
-	if f.during != nil {
-		f.during(p)
+func (f *fakeDeployer) Deploy(ctx context.Context, req deploy.Request) deploy.Result {
+	f.mu.Lock()
+	f.deployed = append(f.deployed, req.Project.Name+"@"+req.SHA)
+	f.mu.Unlock()
+
+	compose := strings.ToLower(req.Project.Repo.Name)
+	if req.Claim != nil {
+		if err := req.Claim(ctx, compose); err != nil {
+			return deploy.Result{Status: projects.StatusFailed, FailureKind: projects.FailurePermanent, FailedStep: deploy.StepInspect, Err: err}
+		}
 	}
+	if f.result != nil {
+		return f.result(req)
+	}
+	return deploy.Result{Status: projects.StatusSucceeded, ComposeProject: compose,
+		Steps: []projects.Step{{Name: deploy.StepFetch, Status: projects.StepSucceeded}}}
+}
+
+func (f *fakeDeployer) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.deployed = append(f.deployed, p.Name)
-	if f.fail[p.Name] {
-		return fmt.Errorf("build of %s failed", p.Name)
+	return len(f.deployed)
+}
+
+func failing(kind string) func(deploy.Request) deploy.Result {
+	return func(deploy.Request) deploy.Result {
+		return deploy.Result{Status: projects.StatusFailed, FailureKind: kind, FailedStep: deploy.StepBuild,
+			Err: errors.New("build: exit status 1")}
 	}
-	return nil
 }
 
 func setup(t *testing.T, commits fakeCommits, names ...string) (*Orchestrator, *projectstest.Store, *fakeDeployer) {
@@ -57,7 +72,7 @@ func setup(t *testing.T, commits fakeCommits, names ...string) (*Orchestrator, *
 			t.Fatal(err)
 		}
 	}
-	d := &fakeDeployer{fail: map[string]bool{}}
+	d := &fakeDeployer{}
 	return New(store, commits, d, "t"), store, d
 }
 
@@ -79,48 +94,115 @@ func TestScanDeploysNewCommitsAndSkipsFailures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "b") {
 		t.Errorf("Scan = %v, want an error naming b", err)
 	}
-	if strings.Join(d.deployed, ",") != "a,c" {
-		t.Errorf("deployed %v, want [a c]", d.deployed)
+	if strings.Join(d.deployed, ",") != "a@aaa,c@ccc" {
+		t.Errorf("deployed %v", d.deployed)
 	}
 	if b := get(t, store, "b"); b.LastError == "" || b.Checks != 1 {
-		t.Errorf("b: error %q, %d checks", b.LastError, b.Checks)
+		t.Errorf("b: %+v", b)
 	}
-	if a := get(t, store, "a"); a.DeployedSHA != "aaa" || a.Checks != 1 || a.LastError != "" {
+	a := get(t, store, "a")
+	if a.DeployedSHA != "aaa" || a.ComposeProject != "a" || a.LastError != "" {
 		t.Errorf("a: %+v", a)
 	}
-	if h, _ := store.History(ctx, "a", 10); len(h) != 1 || h[0].Trigger != projects.TriggerCheck || h[0].Status != projects.StatusSucceeded || h[0].SHA != "aaa" {
-		t.Errorf("a's history = %+v", h)
+	if h, _ := store.Deployment(ctx, "a", 1); h.Trigger != projects.TriggerCheck || len(h.Steps) != 1 {
+		t.Errorf("a's deployment = %+v", h)
 	}
 
 	// Nothing changed on GitHub: nothing deploys again.
-	d.deployed = nil
 	o.Scan(ctx)
-	if len(d.deployed) != 0 {
+	if d.count() != 2 {
 		t.Errorf("second scan deployed %v", d.deployed)
 	}
 }
 
-func TestFailedDeployIsRetried(t *testing.T) {
-	o, store, d := setup(t, fakeCommits{"a": "aaa"}, "a")
-	d.fail["a"] = true
+func TestBrokenAfterRepeatedFailures(t *testing.T) {
+	commits := fakeCommits{"a": "aaa"}
+	o, store, d := setup(t, commits, "a")
+	d.result = failing(projects.FailurePermanent)
 	ctx := context.Background()
 
-	o.Scan(ctx)
-	if a := get(t, store, "a"); a.DeployedSHA != "" || !strings.Contains(a.LastError, "build of a failed") {
-		t.Errorf("after a failed deploy: %+v", a)
+	for i := 1; i <= projects.BrokenAfter; i++ {
+		err := o.Scan(ctx)
+		if i < projects.BrokenAfter && err == nil {
+			t.Fatalf("scan %d succeeded", i)
+		}
+	}
+	a := get(t, store, "a")
+	if !a.Broken || a.FailureCount != projects.BrokenAfter || !strings.Contains(a.LastError, "broken after 3") {
+		t.Fatalf("after %d failures: %+v", projects.BrokenAfter, a)
 	}
 
-	d.fail["a"] = false
+	// Broken: the same commit isn't tried again, and the scan isn't an error.
+	if err := o.Scan(ctx); err != nil {
+		t.Errorf("scan of a broken project = %v", err)
+	}
+	if d.count() != projects.BrokenAfter {
+		t.Errorf("deployed %d times, want %d", d.count(), projects.BrokenAfter)
+	}
+	if a := get(t, store, "a"); !strings.Contains(a.LastError, "build: exit status 1") {
+		t.Errorf("the error that broke it was lost: %q", a.LastError)
+	}
+
+	// A new commit is tried.
+	commits["a"] = "bbb"
+	d.result = nil
 	if err := o.Scan(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if a := get(t, store, "a"); a.DeployedSHA != "aaa" || a.LastError != "" {
-		t.Errorf("after a successful deploy: %+v", a)
+	if a := get(t, store, "a"); a.Broken || a.DeployedSHA != "bbb" || a.FailureCount != 0 {
+		t.Errorf("after a new commit deployed: %+v", a)
+	}
+}
+
+func TestTransientFailuresDontBreak(t *testing.T) {
+	o, store, d := setup(t, fakeCommits{"a": "aaa"}, "a")
+	d.result = failing(projects.FailureTransient)
+	for i := 0; i < projects.BrokenAfter+2; i++ {
+		o.Scan(context.Background())
+	}
+	if a := get(t, store, "a"); a.Broken || a.FailureCount != 0 {
+		t.Errorf("transient failures broke it: %+v", a)
+	}
+	if d.count() != projects.BrokenAfter+2 {
+		t.Errorf("deployed %d times", d.count())
+	}
+}
+
+func TestRetry(t *testing.T) {
+	o, store, d := setup(t, fakeCommits{"a": "aaa"}, "a")
+	d.result = failing(projects.FailurePermanent)
+	for i := 0; i < projects.BrokenAfter; i++ {
+		o.Scan(context.Background())
 	}
 
-	h, _ := store.History(ctx, "a", 10)
-	if len(h) != 2 || h[0].Status != projects.StatusSucceeded || h[1].Status != projects.StatusFailed || h[1].Error == "" {
-		t.Errorf("history = %+v", h)
+	d.result = nil
+	if err := o.Retry(context.Background(), "A"); err != nil {
+		t.Fatal(err)
+	}
+	if a := get(t, store, "a"); a.Broken || a.DeployedSHA != "aaa" {
+		t.Errorf("after retry: %+v", a)
+	}
+	if h, _ := store.Deployment(context.Background(), "a", 1); h.Trigger != projects.TriggerManual {
+		t.Errorf("retry's trigger = %q", h.Trigger)
+	}
+}
+
+func TestComposeProjectConflict(t *testing.T) {
+	// Two projects whose repositories are both called "site" claim the same
+	// compose project.
+	store := &projectstest.Store{}
+	ctx := context.Background()
+	store.Add(ctx, "first", github.Repo{Owner: "x", Name: "site"})
+	store.Add(ctx, "second", github.Repo{Owner: "y", Name: "site"})
+	d := &fakeDeployer{}
+	o := New(store, fakeCommits{"site": "aaa"}, d, "t")
+
+	if err := o.Deploy(ctx, "first"); err != nil {
+		t.Fatal(err)
+	}
+	err := o.Deploy(ctx, "second")
+	if err == nil || !strings.Contains(err.Error(), `"site" belongs to first already`) {
+		t.Errorf("second deploy = %v, want it to name first", err)
 	}
 }
 
@@ -133,7 +215,7 @@ func TestNoDeployWithoutToken(t *testing.T) {
 	if err := o.Scan(context.Background()); err == nil {
 		t.Error("Scan without a GitHub token succeeded")
 	}
-	if len(d.deployed) != 0 {
+	if d.count() != 0 {
 		t.Error("deployed without a GitHub token")
 	}
 }
@@ -151,10 +233,11 @@ func TestOneScanAtATime(t *testing.T) {
 // another project.
 func TestRemoveDuringScan(t *testing.T) {
 	o, store, d := setup(t, fakeCommits{"a": "aaa", "b": "bbb"}, "a", "b")
-	d.during = func(p projects.Project) {
-		if p.Name == "a" {
+	d.result = func(req deploy.Request) deploy.Result {
+		if req.Project.Name == "a" {
 			store.Remove(context.Background(), "a")
 		}
+		return deploy.Result{Status: projects.StatusSucceeded}
 	}
 
 	if err := o.Scan(context.Background()); err != nil {
@@ -163,30 +246,5 @@ func TestRemoveDuringScan(t *testing.T) {
 	list, _ := store.List(context.Background())
 	if len(list) != 1 || list[0].Name != "b" || list[0].DeployedSHA != "bbb" {
 		t.Fatalf("projects = %+v, want only b at bbb", list)
-	}
-}
-
-func TestDeployNow(t *testing.T) {
-	o, store, d := setup(t, fakeCommits{"a": "aaa"}, "a")
-	ctx := context.Background()
-
-	if err := o.Deploy(ctx, "A"); err != nil {
-		t.Fatal(err)
-	}
-	if a := get(t, store, "a"); a.DeployedSHA != "aaa" {
-		t.Errorf("deployed %q", a.DeployedSHA)
-	}
-
-	d.fail["a"] = true
-	if err := o.Deploy(ctx, "a"); err == nil {
-		t.Error("a failing Deploy returned no error")
-	}
-	h, _ := store.History(ctx, "a", 10)
-	if len(h) != 2 || h[0].Trigger != projects.TriggerManual || h[0].Status != projects.StatusFailed {
-		t.Errorf("history = %+v", h)
-	}
-
-	if err := o.Deploy(ctx, "nope"); !errors.Is(err, projects.ErrNotFound) {
-		t.Errorf("Deploy of an unknown project = %v", err)
 	}
 }

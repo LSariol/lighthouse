@@ -26,6 +26,9 @@ func (c *CLI) list(ctx context.Context, args []string) error {
 	table(rows)
 
 	for _, p := range projects {
+		if p.Broken {
+			out(fmt.Sprintf("\n%s is broken: its latest commit failed %d times. \"report %s\" shows why; \"retry %s\" tries again.", p.Name, p.FailureCount, p.Name, p.Name))
+		}
 		if p.LastError != "" {
 			out(fmt.Sprintf("\n%s, last check %s: %s", p.Name, ago(p.LastErrorAt), p.LastError))
 		}
@@ -43,26 +46,35 @@ func (c *CLI) add(ctx context.Context, args []string) error {
 		return err
 	}
 	success(fmt.Sprintf("Watching %s (%s). It deploys on the next check; \"scan\" checks now.", project.Name, project.URL))
-	info(fmt.Sprintf("Its compose file must name the container %q: see \"help setup\".", project.Container))
+	info("What the repository needs: \"help setup\".")
 	return nil
 }
 
 func (c *CLI) remove(ctx context.Context, args []string) error {
 	skip, rest := takeYesFlag(args[1:])
+	down, rest := takeFlag(rest, "--down")
 	if len(rest) != 1 {
-		return usageError{form: "remove <name> [--yes]"}
+		return usageError{form: "remove <name> [--down] [--yes]"}
 	}
 	name := rest[0]
 
-	ok, err := c.confirmOrRefuse(fmt.Sprintf("Stop watching %q? Its container keeps running.", name), skip, "remove")
+	question := fmt.Sprintf("Stop watching %q? Its containers keep running.", name)
+	if down {
+		question = fmt.Sprintf("Stop watching %q, and stop and remove its containers?", name)
+	}
+	ok, err := c.confirmOrRefuse(question, skip, "remove")
 	if !ok || err != nil {
 		return err
 	}
 
-	if err := c.svc.Remove(ctx, name); err != nil {
+	if err := c.svc.Remove(ctx, name, down); err != nil {
 		return err
 	}
-	success(fmt.Sprintf("Stopped watching %s. Its container is still running: \"docker compose -p %s down\" on the server removes it.", name, name))
+	if down {
+		success(fmt.Sprintf("Removed %s and its containers.", name))
+	} else {
+		success(fmt.Sprintf("Stopped watching %s. Its containers keep running; \"remove %s --down\" would have removed them.", name, name))
+	}
 	return nil
 }
 
