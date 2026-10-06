@@ -346,7 +346,7 @@ networks:
 | Keys Lighthouse reads for itself | `LIGHTHOUSE_GITHUB_TOKEN` (GitHub token), at startup only |
 | Keys it reads for projects | Every `${KEY}` in each project's compose file, as one `GetSecrets` batch per deploy |
 | Audit | Every read shows as `lighthouse` in Cove's `history <KEY>` |
-| Keys reserved for the v1.0.0 database | `LIGHTHOUSE_DATABASE_URL` (app), `LIGHTHOUSE_MIGRATOR_DATABASE_URL` (the server's convention for migrator URLs: `<PROJECT>_MIGRATOR_DATABASE_URL`), and the role passwords `LIGHTHOUSE_DATABASE_{APP,MIGRATOR,READER}_PASSWORD` (the existing `LIGHTHOUSE_APP_PASSWORD` / `_OWNER_` / `_READER_` keys get renamed to these) |
+| Keys for the v1.0.0 database | One connection string per role that logs in, nothing else: `LIGHTHOUSE_DATABASE_URL` (app), `LIGHTHOUSE_MIGRATOR_DATABASE_URL`, `LIGHTHOUSE_READER_DATABASE_URL` (for pgAdmin). The server's convention is `<PROJECT>_<ROLE>_DATABASE_URL`, the app's without a role. No separate password keys: a URL already holds the password, so a second copy could only drift. The old `LIGHTHOUSE_APP_PASSWORD` / `_OWNER_` / `_READER_` keys are retired in [§10.1](#101-database-setup-once-by-hand) |
 
 **First start (bootstrap):**
 
@@ -460,9 +460,20 @@ What `setup.sql` leaves behind:
 | `lighthouse_db` | Owned by `lighthouse_owner`; `PUBLIC` may not connect; the three login roles may |
 | `public` schema in it | Nobody else may create objects there |
 
-Tables and their grants come later, from Lighthouse's migrations.
+Tables and their grants come later, from Lighthouse's migrations. The script never changes an existing role's password; step 4 below has the one-line reset when one is needed.
 
-**Dev** (`sparkdb-dev` on the PC): already in this state (checked 2026-10-05). Only the two connection strings are needed in the **dev** Cove, with `localhost:5000` as the host, since dev Lighthouse runs on the PC: `postgres://lighthouse_app:<password>@localhost:5000/lighthouse_db?sslmode=disable`.
+**Where passwords live:** only in the connection strings in Cove, one per role that logs in:
+
+| Role | Cove key |
+|---|---|
+| `lighthouse_app` | `LIGHTHOUSE_DATABASE_URL` |
+| `lighthouse_migrator` | `LIGHTHOUSE_MIGRATOR_DATABASE_URL` |
+| `lighthouse_reader` | `LIGHTHOUSE_READER_DATABASE_URL` (pgAdmin uses its password) |
+| `lighthouse_owner` | none: it can't log in |
+
+A new password is generated straight into its URL on the server, and `setup.sql` reads it back out of the URL. A password is never typed, shown, or stored twice.
+
+**Dev** (`sparkdb-dev` on the PC): the roles and database are already in place (checked 2026-10-05). In the dev Cove, the URLs use `localhost:5000` as the host, because dev Lighthouse runs on the PC. Add `LIGHTHOUSE_READER_DATABASE_URL` too, then delete the old password keys.
 
 **Prod**, all on the Debian server over SSH unless marked:
 
@@ -473,40 +484,55 @@ Tables and their grants come later, from Lighthouse's migrations.
 2. **Look first:**
    ```bash
    docker exec -i sparkdb psql -U Admin -d postgres -f - < /tmp/check.sql
+   docker exec cove /cove list LIGHTHOUSE_
    ```
-   Note which `lighthouse_*` roles exist. Success: the command prints the tables (empty is fine).
-3. **Passwords in Cove** (`docker exec -it cove /cove shell`):
+   Note which `lighthouse_*` roles exist, and which old password keys Cove has.
+3. **Two shell helpers** for this session (they print nothing):
+   ```bash
+   newpw() { tr -dc A-Za-z0-9 </dev/urandom | head -c 32; }                         # a new random password
+   pw()    { docker exec cove /cove get "$1" | sed -E 's#^postgres://[^:]+:([^@]*)@.*#\1#'; }   # the password inside a URL key
    ```
-   list LIGHTHOUSE_
-   rename LIGHTHOUSE_APP_PASSWORD LIGHTHOUSE_DATABASE_APP_PASSWORD          # if it exists
-   rename LIGHTHOUSE_READER_PASSWORD LIGHTHOUSE_DATABASE_READER_PASSWORD    # if it exists
-   delete LIGHTHOUSE_OWNER_PASSWORD                                         # if it exists: the owner can't log in any more
-   generate LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD 32                        # and the same for any other role step 2 showed missing
-   ```
-4. **Run the setup.** Each password comes straight from Cove, so it never appears on screen or in your shell history:
+4. **One URL per login role**, as `postgres://<role>:<password>@sparkdb:5432/lighthouse_db?sslmode=disable`:
+   - **A role that doesn't exist yet** (usually `lighthouse_migrator`) gets a new password:
+     ```bash
+     docker exec cove /cove create LIGHTHOUSE_MIGRATOR_DATABASE_URL "postgres://lighthouse_migrator:$(newpw)@sparkdb:5432/lighthouse_db?sslmode=disable"
+     ```
+   - **A role that exists, with its password in an old key**, keeps that password. Check it's only letters and digits first (a URL can't hold `@ : / ? #` unescaped; this prints only the verdict):
+     ```bash
+     docker exec cove /cove get LIGHTHOUSE_APP_PASSWORD | grep -qx '[A-Za-z0-9]*' && echo "plain: fine" || echo "special characters: use a new password, see below"
+     docker exec cove /cove create LIGHTHOUSE_DATABASE_URL "postgres://lighthouse_app:$(docker exec cove /cove get LIGHTHOUSE_APP_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
+     ```
+     and the same for `lighthouse_reader` → `LIGHTHOUSE_READER_DATABASE_URL` from `LIGHTHOUSE_READER_PASSWORD`.
+   - **A role that exists, with no known password** (or one with special characters): create its URL with `$(newpw)` as for a new role, then set the role to it after step 5:
+     ```bash
+     docker exec -i sparkdb psql -U Admin -d postgres -v pw="$(pw LIGHTHOUSE_READER_DATABASE_URL)" <<< "ALTER ROLE lighthouse_reader PASSWORD :'pw';"
+     ```
+5. **Run the setup**, giving it every password. It uses only those of roles it has to create and ignores the rest:
    ```bash
    docker exec -i sparkdb psql -U Admin -d postgres \
-     -v migrator_password="$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD)" \
+     -v migrator_password="$(pw LIGHTHOUSE_MIGRATOR_DATABASE_URL)" \
+     -v app_password="$(pw LIGHTHOUSE_DATABASE_URL)" \
+     -v reader_password="$(pw LIGHTHOUSE_READER_DATABASE_URL)" \
      -f - < /tmp/setup.sql
    ```
-   Add `-v app_password=...` or `-v reader_password=...` the same way only if that role was missing; the script says so and changes nothing if one is needed and not given. Success: `Done.` and every row matches its `want` column.
-5. **Connection strings into Cove.** First check the app password has only letters and digits. A URL can't hold `@ : / ? #` unescaped, and this prints only the verdict:
+   Success: `Done.` and every row matches its `want` column.
+6. **Check every login** against the URL in Cove. Each line should print the name shown:
    ```bash
-   docker exec cove /cove get LIGHTHOUSE_DATABASE_APP_PASSWORD | grep -qx '[A-Za-z0-9]*' && echo "plain: fine" || echo "special characters: generate a new one and ALTER ROLE"
+   for key in LIGHTHOUSE_DATABASE_URL LIGHTHOUSE_MIGRATOR_DATABASE_URL LIGHTHOUSE_READER_DATABASE_URL; do
+     docker run --rm --network spark postgres:16 psql "$(docker exec cove /cove get $key)" -Atc "select current_user"
+   done
+   # lighthouse_app, lighthouse_owner (the migrator acts as the owner), lighthouse_reader
    ```
-   Then:
-   ```bash
-   docker exec cove /cove create LIGHTHOUSE_DATABASE_URL "postgres://lighthouse_app:$(docker exec cove /cove get LIGHTHOUSE_DATABASE_APP_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
-   docker exec cove /cove create LIGHTHOUSE_MIGRATOR_DATABASE_URL "postgres://lighthouse_migrator:$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
+   This connects from a separate container over `spark`, the way Lighthouse will, so the password is really checked. A connection from inside the `sparkdb` container may skip the password check.
+7. **Retire the old password keys**, now that the URLs are proven (Cove can `restore` them if needed):
    ```
-6. **Check both logins:**
-   ```bash
-   docker exec sparkdb psql "$(docker exec cove /cove get LIGHTHOUSE_DATABASE_URL)" -Atc "select current_user"            # lighthouse_app
-   docker exec sparkdb psql "$(docker exec cove /cove get LIGHTHOUSE_MIGRATOR_DATABASE_URL)" -Atc "select current_user"   # lighthouse_owner
+   docker exec -it cove /cove delete LIGHTHOUSE_APP_PASSWORD
+   docker exec -it cove /cove delete LIGHTHOUSE_OWNER_PASSWORD
+   docker exec -it cove /cove delete LIGHTHOUSE_READER_PASSWORD
    ```
-7. **Clean up:** `rm /tmp/check.sql /tmp/setup.sql`, and tick the entry in the prod rollout plan.
+8. **Clean up:** `rm /tmp/check.sql /tmp/setup.sql`, and tick the entry in the prod rollout plan. Update pgAdmin's saved password for `lighthouse_reader` if it changed.
 
-**Way back:** nothing reads these yet, so the roles and database can stay as they are. To undo the Cove side: `delete` the new keys and `rename` the old ones back.
+**Way back:** nothing reads these yet. To undo the Cove side: `delete` the URL keys and `restore` the old password keys.
 
 ---
 
