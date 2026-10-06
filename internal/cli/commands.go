@@ -73,7 +73,16 @@ var groupOrder = []string{groupProjects, groupDeploying, groupContainers, groupL
 
 // commandTable lists every command. Adding a command here makes it available
 // at the prompt, as a one-shot command, in help and in Tab completion.
-func commandTable() []command {
+// embedded words `exit` for the CLI inside the daemon, where it stops
+// Lighthouse.
+func commandTable(embedded bool) []command {
+	exit := usage{"exit", "Leave the shell. Lighthouse keeps running and deploying."}
+	exitSummary := "Leave the shell (Lighthouse keeps running)"
+	if embedded {
+		exit = usage{"exit", "Stop Lighthouse (this process), like Ctrl+C."}
+		exitSummary = "Stop Lighthouse"
+	}
+
 	yes := flag{"--yes, -y", "Don't ask for confirmation (for scripts)."}
 	names := (*CLI).projectNames
 	namesOrAll := (*CLI).projectNamesOrAll
@@ -282,8 +291,8 @@ func commandTable() []command {
 		{
 			names:   []string{"exit", "quit"},
 			group:   groupLighthouse,
-			summary: "Leave the shell (Lighthouse keeps running)",
-			usages:  []usage{{"exit", "Leave the shell. Lighthouse keeps running and deploying."}},
+			summary: exitSummary,
+			usages:  []usage{exit},
 			run:     (*CLI).exit,
 		},
 	}

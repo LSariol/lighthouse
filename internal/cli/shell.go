@@ -1,6 +1,7 @@
 // Package cli is Lighthouse's command line: the interactive prompt
-// (`lighthouse shell`) and one-shot commands (`lighthouse list`). Both talk
-// to the running daemon through control.Service.
+// (`lighthouse shell`, or inside the daemon with plain `lighthouse`) and
+// one-shot commands (`lighthouse list`). All of them talk to the daemon
+// through control.Service.
 package cli
 
 import (
@@ -21,6 +22,11 @@ type Options struct {
 	// Env is the environment shown in the prompt, e.g. "dev" or "prod"
 	// (APP_ENV). Production is shown in red.
 	Env string
+
+	// Embedded is true when the CLI runs inside the daemon (plain
+	// `lighthouse`). Then `exit` stops Lighthouse too, and input stays plain
+	// lines, so Ctrl+C reaches the daemon as a signal and stops it.
+	Embedded bool
 }
 
 type CLI struct {
@@ -34,11 +40,13 @@ type CLI struct {
 	scanner     *bufio.Scanner
 	term        *term.Terminal
 	interactive bool
+	embedded    bool
 
 	commands []command
 	byName   map[string]*command
 
-	// leave ends the shell; `exit` calls it. It's set by Run.
+	// leave ends the shell (and, embedded, Lighthouse); `exit` calls it. It's
+	// set by Run.
 	leave func()
 }
 
@@ -48,7 +56,8 @@ func New(svc control.Service, opts Options) *CLI {
 		prompt:      promptFor(opts.Env),
 		scanner:     bufio.NewScanner(os.Stdin),
 		interactive: term.IsTerminal(int(os.Stdin.Fd())),
-		commands:    commandTable(),
+		embedded:    opts.Embedded,
+		commands:    commandTable(opts.Embedded),
 		byName:      make(map[string]*command),
 	}
 
@@ -61,15 +70,23 @@ func New(svc control.Service, opts Options) *CLI {
 }
 
 // Run reads and runs commands until stdin closes, `exit` is typed, or ctx is
-// cancelled. On a terminal it has line editing, history and Tab completion.
+// cancelled. A standalone shell on a terminal has line editing, history and
+// Tab completion. Embedded in the daemon, input stays plain lines so Ctrl+C
+// still stops Lighthouse; when stdin closes (no terminal, as in Docker), Run
+// returns and the daemon keeps running.
 func (c *CLI) Run(ctx context.Context, stop func()) {
 	c.leave = stop
 
-	info("Lighthouse shell. Type \"help\" for commands, \"exit\" to leave.")
-	c.checkDaemon(ctx)
-
-	if c.interactive && c.runTerminal(ctx) {
-		return
+	if c.embedded {
+		if c.interactive {
+			info("Lighthouse is running, with its CLI here. Type \"help\" for commands; \"exit\" or Ctrl+C stops Lighthouse.")
+		}
+	} else {
+		info("Lighthouse shell. Type \"help\" for commands, \"exit\" to leave.")
+		c.checkDaemon(ctx)
+		if c.interactive && c.runTerminal(ctx) {
+			return
+		}
 	}
 
 	for ctx.Err() == nil {

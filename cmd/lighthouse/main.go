@@ -41,10 +41,12 @@ func main() {
 	}
 
 	switch mode {
-	case "", "-h", "--help":
-		printUsage(os.Stdout)
+	case "":
+		runServe(true)
 	case "serve":
-		runServe()
+		runServe(false)
+	case "-h", "--help":
+		printUsage(os.Stdout)
 	case "shell":
 		runShell()
 	case "migrate":
@@ -60,8 +62,9 @@ func main() {
 
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
-  lighthouse serve              Run Lighthouse: watch, deploy, answer the CLI
-  lighthouse shell              Open the interactive CLI
+  lighthouse                    Run Lighthouse with its CLI on this terminal (local use)
+  lighthouse serve              Run Lighthouse only (what Docker runs)
+  lighthouse shell              Open the CLI of a running Lighthouse
   lighthouse <command> [args]   Run one CLI command and exit
   lighthouse migrate [status|up]
                                 Show or apply database migrations
@@ -74,8 +77,11 @@ Run "lighthouse help" to list the CLI commands.
 `)
 }
 
-// runServe runs the daemon until SIGINT or SIGTERM (docker stop).
-func runServe() {
+// runServe runs the daemon until SIGINT or SIGTERM (docker stop). With
+// withShell (plain `lighthouse`), the CLI also runs on this terminal, talking
+// to the daemon directly; `exit` there stops Lighthouse. `lighthouse serve`
+// runs the daemon alone, as in Docker.
+func runServe(withShell bool) {
 	cfg := loadConfig()
 	if err := cfg.ValidateServe(); err != nil {
 		fatal(err)
@@ -100,6 +106,13 @@ func runServe() {
 	// while Lighthouse waits for Cove and the database.
 	controlDone := make(chan error, 1)
 	go func() { controlDone <- control.Serve(ctx, cfg.ControlSocket, d) }()
+
+	if withShell {
+		// When stdin closes (no terminal), the CLI returns and Lighthouse
+		// keeps running; `exit`, Ctrl+C and `docker stop` all cancel ctx.
+		shell := cli.New(d, cli.Options{Env: cfg.Env, Embedded: true})
+		go shell.Run(ctx, stop)
+	}
 
 	loopDone := make(chan struct{})
 	go func() {

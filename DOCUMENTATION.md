@@ -386,7 +386,8 @@ Lighthouse's CLI follows the server's CLI conventions (clig.dev; modelled on Cov
 | `docker exec -it lighthouse /lighthouse shell` | The prompt, `lighthouse (prod)>` (prod in red), with line editing, history and Tab completion of commands and project names. `exit`, Ctrl-D or Ctrl-C leave it; Lighthouse keeps running |
 | `docker exec lighthouse /lighthouse <command>` | One command; exit status 0 or 1. Add `-it` when it may ask a question |
 | `lighthouse help` | Help; works without a running daemon |
-| `lighthouse serve` | The daemon (the container's command) |
+| `lighthouse` (no arguments) | The daemon **plus** its CLI on this terminal, for running locally (as `cove` does). The CLI talks to the daemon directly; `exit` or Ctrl+C stops Lighthouse. Plain line input, no Tab completion. If there's no terminal, the CLI steps aside and the daemon keeps running |
+| `lighthouse serve` | The daemon only (the container's command) |
 | `lighthouse version` | The version |
 | `docker exec lighthouse /lighthouse migrate [status\|up]` | Show or apply database migrations, as the migrator (they're applied at startup anyway) |
 | `docker exec -i lighthouse /lighthouse import -` | Move a pre-1.0 `repos.json` into the database (from standard input, or a file path); safe to run twice |
@@ -659,11 +660,13 @@ Needs Go 1.27.1 and Docker. On Windows, run the commands in PowerShell or Git Ba
 
 ```bash
 cp .env.example .env        # point COVE_URL at your dev Cove; it holds the dev database URLs
-go run ./cmd/lighthouse serve     # one terminal: the daemon
-go run ./cmd/lighthouse shell     # another: the prompt (or: go run ./cmd/lighthouse status)
+go run ./cmd/lighthouse           # Lighthouse with its CLI on this terminal; "exit" stops it
+# or, in two terminals:
+go run ./cmd/lighthouse serve     # the daemon only
+go run ./cmd/lighthouse shell     # a separate prompt with Tab completion (or: go run ./cmd/lighthouse status)
 ```
 
-Success: the daemon logs `Lighthouse starting`, then `waiting for …` or `Lighthouse ready`; `status` in the other terminal answers. VS Code has launch configurations for both (`.vscode/launch.json`).
+Success: the daemon logs `Lighthouse starting`, then `waiting for …` or `Lighthouse ready`, and `status` answers. In VS Code, F5 runs "Lighthouse" (the first form); "Lighthouse: shell" connects to one already running (`.vscode/launch.json`).
 
 **Everything stays in the repository.** A local run reads and writes only inside `.dev/`: the staging and download folders, the control socket and the dev Cove token. Its database is `lighthouse_db` on `sparkdb-dev`, through the URLs in the dev Cove. `.dev/` is gitignored and kept out of Docker builds. Go tests use temporary folders that the test runner removes afterwards.
 

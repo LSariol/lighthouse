@@ -87,7 +87,7 @@ func run(t *testing.T, svc control.Service, line string) (string, string, error)
 
 func TestCommandTable(t *testing.T) {
 	seen := map[string]bool{}
-	for _, cmd := range commandTable() {
+	for _, cmd := range commandTable(false) {
 		if !slices.Contains(groupOrder, cmd.group) {
 			t.Errorf("%s: group %q isn't in groupOrder", cmd.names[0], cmd.group)
 		}
@@ -106,7 +106,7 @@ func TestCommandTable(t *testing.T) {
 // Help is wrapped at 80 characters, everywhere.
 func TestHelpWidth(t *testing.T) {
 	topics := []string{"help"}
-	for _, cmd := range commandTable() {
+	for _, cmd := range commandTable(false) {
 		topics = append(topics, "help "+cmd.names[0])
 	}
 	for _, g := range guides {
@@ -314,5 +314,27 @@ func TestStatusDatabase(t *testing.T) {
 	svc.status.Schema = ""
 	if _, _, err := run(t, svc, "status"); err == nil || !strings.Contains(err.Error(), "database is unreachable") {
 		t.Errorf("status with the database down = %v", err)
+	}
+}
+
+func TestEmbeddedExit(t *testing.T) {
+	for _, embedded := range []bool{false, true} {
+		var exit command
+		for _, cmd := range commandTable(embedded) {
+			if cmd.names[0] == "exit" {
+				exit = cmd
+			}
+		}
+		stops := strings.Contains(exit.summary, "Stop Lighthouse")
+		if stops != embedded {
+			t.Errorf("embedded=%v: exit summary %q", embedded, exit.summary)
+		}
+	}
+
+	stopped := false
+	c := New(newFake(), Options{Embedded: true})
+	c.leave = func() { stopped = true }
+	if err := c.Exec(context.Background(), []string{"exit"}); err != nil || !stopped {
+		t.Errorf("exit: %v, stopped %v", err, stopped)
 	}
 }

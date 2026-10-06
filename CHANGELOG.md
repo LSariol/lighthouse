@@ -6,6 +6,7 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 
 ### Changed
 - **The CLI** is a separate process: `docker exec -it lighthouse /lighthouse shell` for the prompt, or one command at a time (`docker exec lighthouse /lighthouse status`). It follows the server's CLI conventions: grouped `help`, `help <command>` with usage, flags and examples, guides (`help setup`, `help failed`), line editing, history, Tab completion, data on stdout and messages on stderr, `(y/N)` confirmations with `--yes`, non-zero exit status on failure. No more `docker attach`.
+- Run modes match Cove: `lighthouse` alone runs the daemon with its CLI on the terminal (local use; `exit` stops it), `lighthouse serve` the daemon only (Docker), `lighthouse shell` a separate prompt.
 - Commands take project names (case-insensitive) and act only on watched projects. `rebuild` is now `deploy` (the old name still works); `change` / `update url` / `update name` are `set-url` and `rename`.
 - `status` reports Lighthouse's health (startup, Cove, GitHub token, automatic deploys) and every project's state, and exits non-zero when something needs attention.
 - Settings: `COVE_ADDRESS` is now `COVE_URL`; new `APP_ENV`, `LIGHTHOUSE_VERSION`, `LIGHTHOUSE_POLL_INTERVAL`, `LIGHTHOUSE_CONTROL_SOCKET`. The `.env` file is optional (local development only).
