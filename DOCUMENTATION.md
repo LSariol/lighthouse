@@ -6,7 +6,7 @@ The complete reference for **Lighthouse**, the self-hosted deployer for the `spa
 - [Cove](https://github.com/LSariol/Cove): the secret vault Lighthouse reads from. Its `DOCUMENTATION.md` §9 (connecting a project), §10 (bootstrap) and §14 (operations) are the other half of this document.
 - [CoveClient](https://github.com/LSariol/CoveClient): the Go library Lighthouse uses to talk to Cove.
 
-> **Status.** This document describes `release/1.0.0` after the foundation work (steps 1–5 of [§16.8](#168-order-of-work)): new config, CLI, control socket, tests and CI. The deploy pipeline itself is still the pre-1.0 one. Sections 1–13 describe what the code **does today**, rough edges included. Section 14 lists the standards every change must follow. Sections 15–17 list what is still wrong and what v1.0.0 will look like.
+> **Status.** This document describes `release/1.0.0` after steps 1 and 2 of [§16.8](#168-order-of-work): the foundation (config, CLI, control socket, tests, CI) and the database (projects and deploy history in Postgres). The deploy pipeline itself is still the pre-1.0 one. Sections 1–13 describe what the code **does today**, rough edges included. Section 14 lists the standards every change must follow. Sections 15–17 list what is still wrong and what v1.0.0 will look like.
 
 ---
 
@@ -17,7 +17,7 @@ The complete reference for **Lighthouse**, the self-hosted deployer for the `spa
 3. [Architecture](#3-architecture)
 4. [Flows](#4-flows)
 5. [Configuration](#5-configuration)
-6. [Data: the watchlist](#6-data-the-watchlist)
+6. [Data: the database](#6-data-the-database)
 7. [Connecting a project (the contract)](#7-connecting-a-project-the-contract)
 8. [Cove integration](#8-cove-integration)
 9. [CLI](#9-cli)
@@ -70,7 +70,7 @@ The project reads plain environment variables: it needs no Cove code, address or
 | Source | Always the `main` branch, as a ZIP archive |
 | Build and run | `docker compose up -d --build --remove-orphans` in the unpacked folder, using the host's Docker daemon through the mounted socket; one deploy at a time |
 | Secrets | `${KEY}` placeholders resolved from Cove with one `GetSecrets` batch, passed only in the `docker compose` process environment (never written to disk) |
-| State | `repos.json` (the watchlist plus per-repo stats) on a bind mount; moves to Postgres in v1.0.0 |
+| State | Postgres (`lighthouse_db` on sparkdb): the projects, and a history of every deploy. Schema by goose migrations built into the binary |
 | Control | `lighthouse serve` is the daemon; the CLI (`shell` or one-shot commands) is a separate process that talks to it through a Unix socket |
 
 ---
@@ -87,6 +87,7 @@ On the server. `lh` below stands for `docker exec -it lighthouse /lighthouse`; a
 | Stop watching | `lh remove <name>` (the container keeps running) |
 | See what's watched | `lh list` |
 | Deploy now | `lh deploy <name>` (or `deploy all`) |
+| How did its deploys go? | `lh history <name>` |
 | Check for new commits now | `lh scan` |
 | Freeze automatic deploys | `lh pause` / `lh resume` |
 | A project's output | `lh logs <name> [lines]` |
@@ -95,14 +96,15 @@ On the server. `lh` below stands for `docker exec -it lighthouse /lighthouse`; a
 | Add a secret a project needs | In Cove: `create <PROJECT>_<PLATFORM>_<TYPE> <value>`, then reference it as `${...}` in the project's compose file |
 | Give Lighthouse a new Cove token | Delete `/srv/server/storage/lighthouse/cove/token`, `bootstrap open lighthouse` in Cove, `docker restart lighthouse` |
 | Change the GitHub token | In Cove: `update LIGHTHOUSE_GITHUB_TOKEN <token>`, then `docker restart lighthouse` (it's read once at startup) |
+| Database migrations | `lh migrate status`; they're applied automatically at startup |
 
 ---
 
 ## 3. Architecture
 
 ```
-cmd/lighthouse/main.go     Modes (serve, shell, one command, version) and the wiring of the
-                           packages below; nothing else
+cmd/lighthouse/main.go     Modes (serve, shell, one command, migrate, import, version), the
+                           startup order, and the wiring of the packages below
 internal/
   config/                  Every setting, read from the environment once and validated
   cli/                     The command table, help and guides, the shell (line editing,
@@ -110,43 +112,48 @@ internal/
   control/                 The CLI ↔ daemon protocol: Service (what the CLI can ask), Serve
                            (HTTP over a Unix socket) and Client (the CLI's side)
   daemon/                  Implements control.Service on the parts below; turns their errors
-                           into messages that say how to fix them; startup phase
+                           into messages that say how to fix them; the startup phase
   orchestrator/            When projects deploy: the check loop, Scan, Deploy; one scan at a
-                           time; records results in the watchlist
+                           time; records every check and deploy in the store
   deploy/                  How a project deploys (one at a time): download and unpack
                            (source.go), placeholders, secrets and compose up (compose.go),
                            the scratch folders (workspace.go)
-  watchlist/               The projects and their state, stored in repos.json; Project and its
-                           Record… methods
+  projects/                Project, Deployment, the Store interface, name rules
+    projectstest/          An in-memory Store, and the tests every Store must pass
+  database/                Postgres: the pool, goose migrations (migrations/, built in), the
+                           schema check, and the Store
+  reposjson/               Reads a pre-1.0 repos.json, for `lighthouse import`
   github/                  Repository URLs, latest commit
   docker/                  Container start, stop, restart, state, logs (Docker SDK)
-  cove/                    Connecting to Cove at startup: token, readiness, the GitHub token
-scripts/db/                Admin SQL for sparkdb, run by hand (§10.1)
+  cove/                    Connecting to Cove at startup; Lighthouse's own secrets
+scripts/
+  db/                      Admin SQL for sparkdb, run by hand (§10.1); CI uses it too
+  test-db.sh               A throwaway Postgres for the integration tests (§13.1)
 Dockerfile                 golang:1.27.1-alpine → alpine:3.24 + docker-cli + docker-cli-compose
 docker-compose.yml         Lighthouse's own service: server paths, docker.sock, spark network
-.github/workflows/ci.yml   gofmt, vet, tests with -race, govulncheck, binary and image builds
+.github/workflows/ci.yml   gofmt, vet, tests with -race (with Postgres), govulncheck, builds
 ```
 
 **Dependencies point one way:**
 
 ```
 main ─► cli ─► control
-main ─► daemon ─► orchestrator ─► watchlist ─► github
+main ─► daemon ─► orchestrator ─► projects (Store) ◄── database
                          │
-                         └─(Deployer)─► deploy ─► docker, CoveClient, watchlist
-        daemon ─► docker, watchlist, github
-main ─► cove ─► CoveClient
+                         └─(Deployer)─► deploy ─► docker, CoveClient, projects
+        daemon ─► docker, github, projects
+main ─► cove ─► CoveClient          main ─► reposjson ─► projects, github
 ```
 
-`cli` only knows `control.Service`; `orchestrator` only knows the `Deployer` and `Commits` interfaces; `daemon` only knows a `Containers` interface. Each is tested with a fake in place of the real thing. Only `config` reads the environment (the `docker compose` subprocess inherits it).
+`cli` only knows `control.Service`; `orchestrator` and `daemon` only know `projects.Store`, and the `Deployer`, `Commits`, `Containers` and `Health` interfaces. Each is tested with a fake in place of the real thing. The in-memory Store passes the same tests as the Postgres one (`projectstest.RunStoreTests`), so the fake can't drift from the real thing. Only `config` reads the environment (the `docker compose` subprocess inherits it).
 
 **Where things go:**
 - A new CLI command → a `cli/cmd_*.go` function plus one entry in `commandTable()`; help and completion pick it up. If it asks the daemon for something new: a `control.Service` method, its route in `control/server.go`, a `Client` method, and the `daemon` implementation.
 - What happens when → `orchestrator`. How a deploy is done → `deploy`.
-- Anything stored about a project → `watchlist` today; the database store in step 2 replaces it behind the same operations.
-- A setting → a field in `config.Config`, read in `Load`, checked in `ValidateServe`.
+- Something stored → a `projects.Store` method, implemented in `database/store.go` and `projectstest/store.go`, with a case in `projectstest/contract.go`. A schema change → a new migration ([§14.1](#141-databases-and-migrations)).
+- A setting → a field in `config.Config`, read in `Load`, checked in `ValidateServe`. A secret → Cove, read in `cove.ReadSecrets`.
 
-**State and concurrency:** the daemon owns all state. The watchlist's lock is never held during network calls or deploys, and entries are always found by name. A scan runs at most once at a time (a second is refused); deploys run one at a time (a second waits), whether they come from the check loop or the CLI.
+**State and concurrency:** all state is in Postgres; nothing is cached in memory, so the CLI, the check loop and `lighthouse import` always see the same thing. A scan runs at most once at a time (a second is refused); deploys run one at a time (a second waits), whether they come from the check loop or the CLI.
 
 ---
 
@@ -157,16 +164,18 @@ main ─► cove ─► CoveClient
 1. **Config.** `config.Load` reads the environment, plus a `.env` file if one exists (local development only: `APP_ENV_PATH`, else `./.env`). `ValidateServe` stops startup when a required setting is missing, `COVE_URL` has no scheme, the poll interval is under 5 s, or the staging or download folder is `/`, `.` or a system folder. Every startup error is one line, `lighthouse: <message>`, with exit status 1.
 2. **Logging.** `log/slog` text lines with timestamps on stderr (`docker logs lighthouse`).
 3. **Docker client** from the environment (`/var/run/docker.sock`); the API version is negotiated.
-4. **Watchlist.** `repos.json` is loaded. A missing file, a directory in its place, or invalid JSON stops startup with the fix.
-5. **Control socket.** The CLI can connect from here on, so `status` shows startup progress (`starting`, then `waiting for Cove`).
-6. **Cove**, retried until it works:
+4. **Control socket.** The CLI can connect from here on; `status` shows the startup phase, and everything else answers "still starting".
+5. **Cove** (phase `waiting for Cove`), retried until it works:
    - `LoadOrBootstrap(COVE_TOKEN_PATH)` reads the token file, or fetches a token through Cove's bootstrap endpoint the first time and saves it (mode 0600, atomically).
    - While the endpoint is closed, or Cove is unreachable, it logs a warning and retries every 15 s.
-   - `WaitForReady` waits until Cove and its database answer.
-   - `Auth` checks the token. A rejected token stops startup with the fix: delete the file, `bootstrap open lighthouse`.
-   - `LIGHTHOUSE_GITHUB_TOKEN` is read from Cove. A missing key stops startup with the fix.
-7. **Running.** `status` says `running`. The first check starts at once, then one every `LIGHTHOUSE_POLL_INTERVAL`.
-8. **Stopping** (`docker stop`, SIGTERM). Lighthouse stops answering the CLI, waits up to 8 s for a deploy in progress, and removes the socket. A deploy still running then is cut off ([B10](#b10-no-timeouts-and-no-graceful-shutdown)).
+   - `WaitForReady` waits until Cove and its database answer; `Auth` checks the token. A rejected token stops startup with the fix: delete the file, `bootstrap open lighthouse`.
+6. **Secrets.** One `GetSecrets` batch reads `LIGHTHOUSE_GITHUB_TOKEN`, `LIGHTHOUSE_DATABASE_URL` and `LIGHTHOUSE_MIGRATOR_DATABASE_URL`. If any is missing, startup stops and names every missing key.
+7. **Database** (phase `migrating the database`):
+   - Pending migrations are applied as `lighthouse_migrator` (acting as `lighthouse_owner`), under a Postgres lock so two Lighthouses can't migrate at once.
+   - The pool connects as `lighthouse_app`, and the schema check refuses a database missing a migration this build needs.
+   - While the database is unreachable (sparkdb restarting), the phase is `waiting for the database` and it retries every 15 s. Any other database error (a wrong password, a failed migration) stops startup.
+8. **Running.** `status` says `running`. The first check starts at once, then one every `LIGHTHOUSE_POLL_INTERVAL`.
+9. **Stopping** (`docker stop`, SIGTERM). Lighthouse stops answering the CLI, waits up to 8 s for a deploy in progress, closes the database and removes the socket. A deploy still running then is cut off ([B10](#b10-no-timeouts-and-no-graceful-shutdown)); its history row is still written.
 
 A fatal error after the socket is open (for example a revoked Cove token) exits with status 1. Docker's `restart: unless-stopped` starts Lighthouse again, so the same one-line message repeats in `docker logs` until it's fixed.
 
@@ -179,14 +188,15 @@ GET https://api.github.com/repos/<owner>/<repo>/commits?per_page=1   (Authorizat
   ├─ error / non-200 / no commits → record the error on that project, go on to the next one
   └─ sha = the newest commit on the repository's default branch
 
-if sha differs from stats.updates.lastSeenCommitSha (or none is recorded):
+if sha differs from the project's deployed commit (or none is recorded):
     Deployer.Deploy(project)
-      ├─ fails → record the error; the commit is NOT recorded, so the next check deploys again
-      └─ works → record the commit and clear the error
-record the check (time, count); save repos.json once per scan
+    record a deployment row (trigger "check", succeeded/failed, times, error)
+      ├─ fails → it becomes the last error; the deployed commit is unchanged, so the next check deploys again
+      └─ works → it becomes the deployed commit, and the last error is cleared
+record the check (time, count, and the error or none)
 ```
 
-A scan that had failures logs one line naming the projects; `list` and `status` show each project's last error. A successful check clears it.
+A scan that had failures logs one line naming the projects; `list` and `status` show each project's last error, and `history <name>` every deploy attempt. A successful check clears the last error. A deploy from the CLI (`deploy <name>`) is recorded the same way, with trigger `manual`.
 
 ### 4.3 The deploy pipeline (`deploy.Deployer.Deploy`)
 
@@ -219,7 +229,7 @@ Steps 3–7 are why a failed deploy causes an outage ([B1](#b1-a-failed-deploy-t
 lighthouse <command>  or  the shell
   → cli: command table → argument checks, confirmation (y/N) for destructive commands
   → control.Client: HTTP over the Unix socket (LIGHTHOUSE_CONTROL_SOCKET)
-  → daemon: checks the project is watched, calls watcher / builder
+  → daemon: checks the project is watched, calls the store, orchestrator or Docker
   → JSON answer: data, or an error with a kind and a message that says how to fix it
   → cli: data on stdout, messages on stderr (✓ ! ✗ ?), exit status 0 or 1
 ```
@@ -230,13 +240,12 @@ lighthouse <command>  or  the shell
 
 ## 5. Configuration
 
-All settings are environment variables. In Docker they're written out in `docker-compose.yml`'s `environment:` (none of them is a secret). For local development they can come from a `.env` file ([§13.1](#131-running-locally)).
+All settings are environment variables; Lighthouse's secrets (the GitHub token and both database URLs) come from Cove instead ([§8](#8-cove-integration)). In Docker they're written out in `docker-compose.yml`'s `environment:` (none of them is a secret). For local development they can come from a `.env` file ([§13.1](#131-running-locally)).
 
 | Variable | Required for `serve` | Description |
 |---|---|---|
 | `COVE_URL` | Yes | Cove's base URL, `http://cove:2100` in Docker |
 | `COVE_TOKEN_PATH` | Yes | Where Lighthouse's Cove token is kept. Docker: `/app/vault/cove/token` |
-| `APP_REPO_PATH` | Yes | The watchlist file. Docker: `/app/vault/repos.json` |
 | `STAGING_PATH` | Yes | Where archives are unpacked. **Emptied on every deploy**, so it can't be `/`, `.` or a system folder. Docker: `/app/server/staging/` |
 | `DOWNLOAD_PATH` | Yes | Where archives are downloaded. **Emptied on every deploy**, same rules. Docker: `/app/server/download/` |
 | `APP_ENV` | No | `dev` or `prod`, shown in the shell's prompt (`lighthouse (prod)>`, prod in red) and by `status` |
@@ -252,7 +261,6 @@ A malformed value stops startup with a message naming the setting.
 | Host path | Container path | Contents |
 |---|---|---|
 | `/srv/server/storage/lighthouse/cove/` | `/app/vault/cove/` | The Cove token file (`token`, mode 0600) |
-| `/srv/server/storage/lighthouse/repos.json` | `/app/vault/repos.json` | The watchlist. Must exist before the first start (`[]`); **if the host file is missing, Docker creates a directory** and Lighthouse refuses to start, saying so |
 | `/srv/server/staging/` | `/app/server/staging/` | Scratch space |
 | `/srv/server/download/` | `/app/server/download/` | Scratch space |
 | `/var/run/docker.sock` | `/var/run/docker.sock` | Full control of the host's Docker (effectively root) |
@@ -261,31 +269,37 @@ No port is published and no terminal is attached. Lighthouse joins the external 
 
 ---
 
-## 6. Data: the watchlist
+## 6. Data: the database
 
-`repos.json` is a JSON array of `WatchedRepo`:
+Lighthouse's state is in `lighthouse_db` on sparkdb, schema `lighthouse`. Roles, the database and ownership are set up by hand once ([§10.1](#101-database-setup-once-by-hand)); everything inside the schema comes from the goose migrations in `internal/database/migrations/` ([§14.1](#141-databases-and-migrations)).
 
-```jsonc
-{
-  "displayName": "cove",                 // the project's name in the CLI (case-insensitive)
-  "containerName": "Cove",               // actually the GitHub repo name; lowercased, it's the container name
-  "url": "https://github.com/LSariol/Cove",
-  "apiURL": "https://api.github.com/repos/LSariol/Cove",
-  "downloadURL": "https://github.com/LSariol/Cove/archive/refs/heads/main.zip",
-  "stats": {
-    "meta":      { "startedWatchingAt": "...", "lastModifiedAt": null },
-    "queries":   { "lastQueriedAt": "...", "queryCount": 0, "lastErrorAt": null, "lastErrorMessage": null },
-    "updates":   { "lastUpdatedAt": "...", "lastSeenCommitSha": "…", "lastSeenTag": null, "updateCount": 0 },
-    "builds":    { "lastBuildAt": null, "lastBuildStatus": null, "buildTriggeredCount": 0 },   // never written
-    "downloads": { "lastDownloadAt": null, "lastDownloadStatus": null, "downloadTriggeredCount": 0 } // never written
-  }
-}
-```
+**`projects`**: one row per watched repository.
 
-- `lastSeenCommitSha` is the deploy state: a project is deployed whenever GitHub reports a different commit. It's recorded only after a deploy succeeds.
-- `lastErrorMessage` is the last failed check or deploy; it's cleared by the next success.
-- The file is saved once per scan and after each change from the CLI (`os.WriteFile`, not atomic; [B15](#b15-reposjson-writes-are-unsafe)).
-- **v1.0.0 replaces this file with Postgres tables** managed by goose migrations ([§14.1](#141-databases-and-migrations), [16.7](#167-database-design)); `lighthouse import repos.json` moves it over.
+| Column | Notes |
+|---|---|
+| `id` | Identity; never shown |
+| `name` | The name in the CLI: letters, digits, `-`, `_`, up to 64. Unique without regard to case |
+| `repo_owner`, `repo_name` | `https://github.com/<owner>/<name>`; unique without regard to case. The container is `repo_name`, lowercased |
+| `created_at`, `updated_at` | When Lighthouse started watching it; when it was last renamed or pointed elsewhere |
+| `deployed_sha`, `deployed_at` | The last **successful** deploy. A project is deployed whenever GitHub reports a different commit |
+| `last_checked_at`, `check_count` | The last check of GitHub |
+| `last_error`, `last_error_at` | The last problem (a check or a deploy), cleared by the next success. Messages are cut at 2,000 characters |
+
+**`deployments`**: one row per deploy attempt, written when it ends.
+
+| Column | Notes |
+|---|---|
+| `project_id` | Its project; the rows go when the project is removed |
+| `sha` | The commit deployed |
+| `trigger` | `check` (a new commit found by a check or `scan`) or `manual` (`deploy <name>`) |
+| `status` | `succeeded` or `failed` |
+| `started_at`, `finished_at`, `error` | |
+
+**`goose_db_version`**: which migrations have run.
+
+**Who may do what** (from migration `00002`): `lighthouse_app` reads and changes `projects`, but can only **add** to `deployments`, never change or delete history, and only reads `goose_db_version`; it can't create anything. `lighthouse_reader` reads everything (pgAdmin). Everything is owned by `lighthouse_owner`.
+
+**From the pre-1.0 Lighthouse:** `lighthouse import` reads its `repos.json` and adds each project with its state: when watching started, the deployed commit, checks, last error. It's safe to run twice, because existing projects are skipped. Steps in [§10](#10-deploying-lighthouse).
 
 ---
 
@@ -343,10 +357,10 @@ networks:
 | Client | CoveClient `v1.0.0` (`github.com/lsariol/coveclient`) |
 | Address | `COVE_URL=http://cove:2100` on `spark`; Cove has no published port |
 | Token | Lighthouse's own project token, **read-only over everything** (`token create lighthouse --allow '*'`). Fetched once through the bootstrap endpoint and saved to `COVE_TOKEN_PATH`; checked with `Auth` on every start |
-| Keys Lighthouse reads for itself | `LIGHTHOUSE_GITHUB_TOKEN` (GitHub token), at startup only |
+| Keys Lighthouse reads for itself | At startup, in one batch: `LIGHTHOUSE_GITHUB_TOKEN`, `LIGHTHOUSE_DATABASE_URL` (as `lighthouse_app`), `LIGHTHOUSE_MIGRATOR_DATABASE_URL` (as `lighthouse_migrator`). All three must exist |
 | Keys it reads for projects | Every `${KEY}` in each project's compose file, as one `GetSecrets` batch per deploy |
 | Audit | Every read shows as `lighthouse` in Cove's `history <KEY>` |
-| Keys for the v1.0.0 database | One connection string per role that logs in, nothing else: `LIGHTHOUSE_DATABASE_URL` (app), `LIGHTHOUSE_MIGRATOR_DATABASE_URL`, `LIGHTHOUSE_READER_DATABASE_URL` (for pgAdmin). The server's convention is `<PROJECT>_<ROLE>_DATABASE_URL`, the app's without a role. No separate password keys: a URL already holds the password, so a second copy could only drift. The old `LIGHTHOUSE_APP_PASSWORD` / `_OWNER_` / `_READER_` keys are retired in [§10.1](#101-database-setup-once-by-hand) |
+| Database keys | One connection string per role that logs in, nothing else: `LIGHTHOUSE_DATABASE_URL` (app), `LIGHTHOUSE_MIGRATOR_DATABASE_URL`, `LIGHTHOUSE_READER_DATABASE_URL` (for pgAdmin). The server's convention is `<PROJECT>_<ROLE>_DATABASE_URL`, the app's without a role. No separate password keys: a URL already holds the password, so a second copy could only drift. The old `LIGHTHOUSE_APP_PASSWORD` / `_OWNER_` / `_READER_` keys are retired in [§10.1](#101-database-setup-once-by-hand) |
 
 **First start (bootstrap):**
 
@@ -374,6 +388,8 @@ Lighthouse's CLI follows the server's CLI conventions (clig.dev; modelled on Cov
 | `lighthouse help` | Help; works without a running daemon |
 | `lighthouse serve` | The daemon (the container's command) |
 | `lighthouse version` | The version |
+| `docker exec lighthouse /lighthouse migrate [status\|up]` | Show or apply database migrations, as the migrator (they're applied at startup anyway) |
+| `docker exec -i lighthouse /lighthouse import -` | Move a pre-1.0 `repos.json` into the database (from standard input, or a file path); safe to run twice |
 
 ### Commands
 
@@ -387,13 +403,14 @@ Lighthouse's CLI follows the server's CLI conventions (clig.dev; modelled on Cov
 | `rename` | `rename <name> <new-name>` | Lighthouse's name only; repository and container unchanged |
 | `set-url` | `set-url <name> <url>` | Watch another repository under the same name; the container name follows the new repository |
 | `deploy`, `rebuild` | `deploy <name\|all> [--yes]` | Deploy the latest commit now and wait. `all` asks first |
+| `history` | `history <name> [count]` | The last deploys (10, up to 100), newest first: when, trigger (`check`/`manual`), result, commit, duration, the error's first line |
 | `scan` | `scan` | Check every project now and deploy new commits; refused while another scan runs |
 | `pause` / `resume` | | Stop / restart automatic checks. `deploy` and `scan` still work. A restart of Lighthouse resumes |
 | `start` | `start <name\|all>` | Start a project's container |
 | `stop` | `stop <name\|all> [--yes]` | Asks first |
 | `restart` | `restart <name\|all> [--yes]` | `all` asks first |
 | `logs` | `logs <name> [lines]` | The container's last lines (50, up to 10,000), on stdout |
-| `status` | `status` | Version, environment, startup state, automatic deploys, Cove, GitHub token, and every project's container state and last check. Exits 1 and lists what needs attention when something does |
+| `status` | `status` | Version, environment, startup state, automatic deploys, Cove, GitHub token, database and schema, and every project's container state and last check. Exits 1 and lists what needs attention when something does |
 | `help`, `h` | `help [command\|setup\|failed]` | |
 | `exit`, `quit` | | Leave the shell |
 
@@ -413,10 +430,8 @@ Lighthouse is deployed **by hand** on the server. It doesn't deploy itself yet: 
 **First deploy** (on the Debian server, over SSH):
 
 ```bash
-# Folders and the watchlist file the bind mounts need. A missing file becomes a
-# directory, so create it first.
+# The folders the bind mounts need.
 sudo mkdir -p /srv/server/storage/lighthouse/cove /srv/server/staging /srv/server/download
-echo '[]' | sudo tee /srv/server/storage/lighthouse/repos.json
 
 docker network inspect spark >/dev/null 2>&1 || docker network create spark
 
@@ -424,10 +439,11 @@ docker network inspect spark >/dev/null 2>&1 || docker network create spark
 #   token create lighthouse --allow '*'
 #   create LIGHTHOUSE_GITHUB_TOKEN <a fine-grained, read-only GitHub token>
 #   bootstrap open lighthouse
+# The database and its two URL keys: §10.1.
 
 git clone https://github.com/LSariol/LightHouse.git && cd LightHouse
 docker compose up -d --build
-docker logs -f lighthouse     # success: "Lighthouse ready" after "GitHub token loaded from Cove"
+docker logs -f lighthouse     # success: "migration applied" (first start only), then "Lighthouse ready"
 docker exec lighthouse /lighthouse status   # success: "✓ Everything is healthy." (or the list of what isn't)
 ```
 
@@ -439,7 +455,19 @@ cd ~/LightHouse && git pull && docker compose up -d --build
 
 State lives in the bind mounts, so rebuilding is safe. A deploy in progress when Lighthouse stops gets 8 seconds, then is cut off: update when `docker logs lighthouse` shows no deploy in progress (`deploy started` without `deploy finished`).
 
-**Upgrading from the pre-1.0 Lighthouse** (one time): the compose file no longer mounts `.env` or publishes port 2000, and it uses `COVE_URL` instead of `COVE_ADDRESS`. The repository's compose file already has these changes; `/srv/server/storage/lighthouse/.env` can be deleted afterwards. The CLI is now `docker exec -it lighthouse /lighthouse shell` instead of `docker attach`.
+**Upgrading from the pre-1.0 Lighthouse** (one time, on the server):
+
+1. The database setup, [§10.1](#101-database-setup-once-by-hand).
+2. `git pull && docker compose up -d --build`. The new compose file no longer mounts `.env` or `repos.json` or publishes port 2000, and uses `COVE_URL`. Success: `docker logs lighthouse` shows the two migrations applied, then `Lighthouse ready` with `projects=0`.
+3. Move the watched projects over, straight from the old file:
+   ```bash
+   docker exec -i lighthouse /lighthouse import - < /srv/server/storage/lighthouse/repos.json
+   ```
+   Success: one `✓ Imported <name>` per project, then `N imported, 0 already there, 0 failed.` Their deployed commits come along, so nothing redeploys unless `main` has moved since.
+4. `docker exec lighthouse /lighthouse status`: every project listed and running.
+5. Afterwards, `/srv/server/storage/lighthouse/repos.json` and `/srv/server/storage/lighthouse/.env` can be deleted (keep a copy of `repos.json` until you're happy).
+
+The CLI is now `docker exec -it lighthouse /lighthouse shell` instead of `docker attach`.
 
 ### 10.1 Database setup (once, by hand)
 
@@ -554,7 +582,7 @@ A new password is generated straight into its URL on the server, and `setup.sql`
 
 `lh help failed` is the short version.
 
-1. `lh list` shows the error; `docker logs lighthouse` has the full output.
+1. `lh list` shows the error, `lh history <name>` every attempt, and `docker logs lighthouse` the full output.
 2. **The project is probably stopped** ([B1](#b1-a-failed-deploy-takes-the-project-down-and-retries-forever)). `lh start <name>` brings the previous version back while you fix it.
 3. Lighthouse retries the whole deploy on every check until it succeeds. To stop the retries meanwhile: `lh pause`, and `lh resume` afterwards.
 4. Fix, push to `main`, then `lh deploy <name>` or wait for the next check.
@@ -583,14 +611,17 @@ Every deploy leaves the previous image behind as a dangling image, plus build ca
 |---|---|
 | `lighthouse: COVE_URL, … are not set` | The compose `environment:` lost lines; compare with the repository's `docker-compose.yml` |
 | `lighthouse: STAGING_PATH "/srv/server": isn't a dedicated folder` | Both work folders are emptied on every deploy; point them at folders only Lighthouse uses |
-| `lighthouse: the watchlist … doesn't exist` / `is a directory` | Create the host file with `echo '[]' > /srv/server/storage/lighthouse/repos.json` (remove the directory first if Docker made one), then `docker restart lighthouse` |
 | `waiting for a Cove token: run "bootstrap open lighthouse"` repeating | No token file and Cove's bootstrap is closed. Open it in Cove |
 | `waiting for Cove to be reachable` repeating | Cove is down or not on `spark`. `docker ps` for `cove`; both containers on `spark` |
 | `lighthouse: Cove rejected Lighthouse's token` (restarting) | The token was rotated or revoked. Delete the token file, `bootstrap open lighthouse`, restart |
-| `lighthouse: LIGHTHOUSE_GITHUB_TOKEN isn't in Cove` | Create it in Cove, restart |
+| `lighthouse: Lighthouse's secrets aren't all in Cove (… missing: KEY…)` | Create the named keys in Cove ([§10.1](#101-database-setup-once-by-hand) for the database URLs), restart |
+| `waiting for the database to be reachable` repeating; `status` says `waiting for the database` | sparkdb is down or Lighthouse isn't on `spark`. `docker ps` for `sparkdb`. It continues by itself once sparkdb answers |
+| `lighthouse: … password authentication failed for user "lighthouse_…"` | The URL in Cove doesn't match the role's password. Reset the role from the URL ([§10.1](#101-database-setup-once-by-hand) step 4), restart |
+| `lighthouse: the database schema is at version N, but this Lighthouse needs M` | Migrations didn't run: check `LIGHTHOUSE_MIGRATOR_DATABASE_URL` logs in as `lighthouse_migrator`; `lh migrate status` shows which are missing |
+| `lighthouse: apply migrations: …` | A migration failed; nothing after it ran. The message names it. Usually a missing role or grant from §10.1: rerun `setup.sql` |
 | `Can't reach the Lighthouse daemon at /run/lighthouse/control.sock` | Lighthouse isn't running, or you ran the CLI outside its container. Use `docker exec … /lighthouse …`; check `docker ps` and `docker logs lighthouse` |
 | `… needs confirmation, and there's no terminal to ask on` | Use `docker exec -it`, or add `--yes` |
-| `Lighthouse is still starting (waiting for Cove)` | `deploy` and `scan` wait for startup; `status` and `docker logs lighthouse` say what it's waiting for |
+| `Lighthouse is still starting (…)` | Every command but `status` waits for startup; `status` and `docker logs lighthouse` say what it's waiting for |
 | A project's last check: `GitHub: 401 Unauthorized` | The GitHub token is wrong or expired. Update `LIGHTHOUSE_GITHUB_TOKEN`, restart |
 | `GitHub: 403` or `429` | Rate limit (5,000 requests an hour per token; each project uses 360 an hour at the default interval) or no access to the repo. Raise `LIGHTHOUSE_POLL_INTERVAL` |
 | `GitHub: 404 Not Found` | Wrong URL, a renamed repo (`set-url`), or a private repo the token can't see. Other projects are still checked |
@@ -627,24 +658,28 @@ What protects what today, and what is left to you. Issues are in [§15](#securit
 Needs Go 1.27.1 and Docker. On Windows, run the commands in PowerShell or Git Bash from the repository folder.
 
 ```bash
-cp .env.example .env        # point COVE_URL at your dev Cove
-mkdir .dev; echo [] > .dev/repos.json
+cp .env.example .env        # point COVE_URL at your dev Cove; it holds the dev database URLs
 go run ./cmd/lighthouse serve     # one terminal: the daemon
 go run ./cmd/lighthouse shell     # another: the prompt (or: go run ./cmd/lighthouse status)
 ```
 
 Success: the daemon logs `Lighthouse starting`, then `waiting for …` or `Lighthouse ready`; `status` in the other terminal answers. VS Code has launch configurations for both (`.vscode/launch.json`).
 
-**Everything stays in the repository.** A local run reads and writes only inside `.dev/`: the watchlist, the staging and download folders, the control socket and the dev Cove token. `.dev/` is gitignored and kept out of Docker builds. Go tests use temporary folders that the test runner removes afterwards.
+**Everything stays in the repository.** A local run reads and writes only inside `.dev/`: the staging and download folders, the control socket and the dev Cove token. Its database is `lighthouse_db` on `sparkdb-dev`, through the URLs in the dev Cove. `.dev/` is gitignored and kept out of Docker builds. Go tests use temporary folders that the test runner removes afterwards.
 
 **Checks before a commit** (CI runs the same on every push to `main` and `release/**`):
 
 ```bash
 gofmt -l .                       # prints nothing
 go vet ./...
+scripts/test-db.sh up            # once: a throwaway Postgres, set up by scripts/db/setup.sql
+eval "$(scripts/test-db.sh env)" # in each new shell: points the integration tests at it
 go test -race ./...              # -race needs cgo: gcc on Windows (msys2), or run in CI
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...   # "No vulnerabilities found."
+scripts/test-db.sh down          # when done
 ```
+
+On Windows, run these in Git Bash. Without the test database, the integration tests in `internal/database` are skipped and everything else still runs. They run against real Postgres (never sparkdb), over TCP, so passwords and grants are really checked.
 
 **The Go version is pinned in two places, kept equal:** `go 1.27.1` in `go.mod` and `golang:1.27.1-alpine` in the `Dockerfile`. Bump both in one commit.
 
@@ -668,8 +703,16 @@ These rules apply to every change, on every project on the server. They come fro
   | `lighthouse_app` | Yes | Lighthouse at runtime; only the grants its migrations give it |
   | `lighthouse_reader` | Yes | Read-only, for pgAdmin |
 
-- **Migration rules** (same as Cove): files `000NN_description.sql`, starting with `-- +goose Up`; `$$` blocks wrapped in `-- +goose StatementBegin` / `StatementEnd`; **never edit a migration that has run in prod**; forward-only, so a mistake is fixed by the next migration; grants for `_app`/`_reader` live in migrations too. Migrations are embedded in the binary, run on startup when the migrator URL is set (with a Postgres advisory lock), and the app refuses to start on a database missing a migration it needs.
-- The Admin SQL for Lighthouse is in [§16.7](#167-database-design).
+- **Migration rules** (same as Cove): files `000NN_description.sql`, starting with `-- +goose Up`; `$$` blocks wrapped in `-- +goose StatementBegin` / `StatementEnd`; **never edit a migration that has run in prod**; forward-only, so a mistake is fixed by the next migration; grants for `_app`/`_reader` live in migrations too. Migrations are embedded in the binary and run at every startup as the migrator (with a Postgres advisory lock); the app refuses to start on a database missing a migration it needs, but a newer database is fine (rolling back the code after an additive migration still works).
+- The Admin SQL for Lighthouse is `scripts/db/setup.sql`, run by hand ([§10.1](#101-database-setup-once-by-hand)).
+- **Lighthouse's migrations** (`internal/database/migrations/`):
+
+  | Migration | What it does |
+  |---|---|
+  | `00001_projects` | `projects` and `deployments` ([§6](#6-data-the-database)) |
+  | `00002_role_grants` | `lighthouse_app`: read/write `projects`, append-only `deployments`, read `goose_db_version`; `lighthouse_reader`: read all, including future tables |
+
+  `lighthouse migrate status` lists them with the time each was applied.
 
 ### 14.2 Secrets (Cove)
 
@@ -800,9 +843,11 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 
 #### B15. `repos.json` writes are unsafe
 **Low** (goes away with the database). Written non-atomically with `os.WriteFile`, once per repo per cycle (about 36 writes a minute with 6 repos). A crash mid-write corrupts it, which silently stops all watching (B5). Atomic rename doesn't work on a single-file bind mount, another reason to move to Postgres.
+**Status: fixed** in step 2: there's no watchlist file any more; state is in Postgres.
 
 #### B16. Stats are half-implemented
 **Low.** `builds.*`, `downloads.*` and `lastSeenTag` are never written; `lastErrorMessage` is never cleared after a success; `UpdateUpdateStats` runs before the build, so `updateCount` counts attempts, not deploys. `list` shows none of the useful fields (last deploy result, last error).
+**Status: fixed** in step 2: every field in the database is written, and every deploy attempt is recorded in `deployments` (`history <name>`).
 **Status: partly fixed.** The last error is cleared after a success and shown by `list` and `status`. The rest goes away with the database.
 
 #### B17. A `.env` file is required but not needed
@@ -945,10 +990,10 @@ The current code is small, about 1,400 lines, and its core flow has structural p
 | F12 | Base image refresh | Could | – |
 | F13 | Unmanaged services | Could | – |
 
-**Progress after the foundation:** F14 is done (Go and image updates, tests, CI). Most of F10 is done (waits for Cove, checks the token, one-line errors); its database steps come with F1. F7's modes (`serve`, `shell`, one-shot) and the current command set are done; `history`, `approve`, `retry`, `rollback`, `check` and `set` arrive with the features they control. F11 is partly done: the published port is gone, and `version` and `status` report `LIGHTHOUSE_VERSION`.
+**Progress after the foundation:** F14 is done (Go and image updates, tests, CI). F10 is done: Lighthouse waits for Cove and for the database, checks its token, migrates, checks the schema, and explains every failure in one line. F7's modes (`serve`, `shell`, one-shot) and the current command set are done; `history`, `approve`, `retry`, `rollback`, `check` and `set` arrive with the features they control. F11 is partly done: the published port is gone, and `version` and `status` report `LIGHTHOUSE_VERSION`.
 
 #### F1. Postgres and goose migrations instead of `repos.json`
-Required by the standards ([§14.1](#141-databases-and-migrations)). Design in [16.7](#167-database-design). A one-time `lighthouse import repos.json` moves the current watchlist over.
+**Done in step 2.** Required by the standards ([§14.1](#141-databases-and-migrations)). What exists: [§6](#6-data-the-database); what later steps add: [16.7](#167-database-design). `lighthouse import` moves a pre-1.0 `repos.json` over.
 
 #### F2. The deploy pipeline
 See [16.3](#163-the-deploy-pipeline). One worker processes a queue; the poller, the reconcile loop and the CLI all enqueue; a per-project lock stops two deploys of the same project.
@@ -1121,7 +1166,7 @@ The layout from the foundation ([§3](#3-architecture)) is the v1.0.0 layout; th
 
 | Step | Adds or changes |
 |---|---|
-| 2. Database | `database/`: pgx pool, goose (embedded `migrations/`), schema check, the project store. It replaces `watchlist/`, with the same operations. `cove/` also reads the database URLs |
+| 2. Database — **done** | `projects/` (types, the Store interface, an in-memory Store and its shared tests), `database/` (pgx pool, goose, schema check, the Postgres Store), `reposjson/` (for `import`); `watchlist/` removed; `cove/` reads the database URLs |
 | 3. Pipeline | `deploy/` rewritten (prepare, swap, verify, rollback); `compose/` for running `docker compose` (config, variables, build, up, ps) with timeouts; `github/` gains archive downloads by SHA |
 | 4. Checks | `checks/`: contract, policy, naming, gitleaks, test stage, Trivy |
 | 5. Orchestrator | `orchestrator/` gains the queue and worker, backoff, release-only mode (`semver/`), the infrastructure tier and the reconcile loop; `docker/` gains the event stream |
@@ -1129,29 +1174,15 @@ The layout from the foundation ([§3](#3-architecture)) is the v1.0.0 layout; th
 
 ### 16.7 Database design
 
-**Admin, by hand, once:** roles, the database, ownership and connect rights are server-wide, so no migration can do them. `scripts/db/setup.sql` does them, and [§10.1](#101-database-setup-once-by-hand) is the step-by-step. Connection strings go in Cove as `LIGHTHOUSE_DATABASE_URL` (app) and `LIGHTHOUSE_MIGRATOR_DATABASE_URL`; Lighthouse reads them from Cove at startup with its own token.
+**Built in step 2:** roles and the database by hand (`scripts/db/setup.sql`, [§10.1](#101-database-setup-once-by-hand)); `projects`, `deployments` and the grants by migrations `00001` and `00002` ([§6](#6-data-the-database)). Connection strings live only in Cove: `LIGHTHOUSE_DATABASE_URL`, `LIGHTHOUSE_MIGRATOR_DATABASE_URL`, `LIGHTHOUSE_READER_DATABASE_URL`.
 
-**Migrations** (`internal/database/migrations/`, schema `lighthouse`, goose table `lighthouse.goose_db_version`, embedded, applied on startup under an advisory lock):
+**Added by later steps**, each as new migrations when its feature lands (never by editing `00001`):
 
-| Migration | Contents |
+| Step | Adds |
 |---|---|
-| `00001_schema` | `CREATE SCHEMA lighthouse`; `projects`, `deployments`, `deployment_steps` |
-| `00002_role_grants` | `lighthouse_app`: read/write `projects`, insert/read/update `deployments` and `deployment_steps`; `lighthouse_reader`: read all; default privileges |
-
-**`projects`**:
-
-| Group | Columns |
-|---|---|
-| Identity | `id`, `name` (unique, lowercase, the compose project name), `repo_owner`, `repo_name` |
-| Settings | `mode` (`branch`/`release`), `branch`, `include_prereleases`, `tier` (`normal`/`infra`), `requires_approval`, `health_url`, `scan_policy` (`off`/`warn`/`block_critical`/`block_high`), `policy_exceptions text[]`, `secret_exceptions text[]` (keys outside `<PROJECT>_*`/`SHARED_*` this project may use), `step_timeouts jsonb` |
-| Desired state | `desired_state` (`running`/`stopped`), `desired_version`, `paused` |
-| Observed | `deployed_version`, `deployed_sha`, `deployed_image`, `last_seen_version`, `last_seen_sha`, `etag`, `last_checked_at`, `last_check_error`, `health` (`healthy`/`unhealthy`/`degraded`/`unknown`) |
-| Failures | `failure_count`, `failing_version`, `broken` (bool), `next_attempt_at` |
-| Timestamps | `created_at`, `updated_at` |
-
-**`deployments`**: `id`, `project_id`, `version`, `sha`, `trigger` (`poll`, `manual`, `retry`, `rollback`, `reconcile`, `self_update`, `import`), `status` (`queued`, `preparing`, `awaiting_approval`, `swapping`, `verifying`, `succeeded`, `failed`, `rolled_back`), `failure_kind` (`transient`/`permanent`), `image`, `previous_image`, `started_at`, `finished_at`, `error`.
-
-**`deployment_steps`**: `deployment_id`, `step`, `status`, `started_at`, `finished_at`, `log_tail` (scrubbed). This is what `history <name>` and `check` show.
+| 3. Pipeline | `deployments`: `image`, `previous_image`, `rolled_back` status; `deployment_steps` (`deployment_id`, `step`, `status`, times, scrubbed `log_tail`); `projects.health_url` |
+| 4. Checks | `projects`: `scan_policy`, `policy_exceptions text[]`, `secret_exceptions text[]` (keys outside `<PROJECT>_*`/`SHARED_*`), `step_timeouts` |
+| 5. Orchestrator | `projects`: `mode` (`branch`/`release`), `branch`, `include_prereleases`, `tier` (`normal`/`infra`), `requires_approval`, `desired_state`, `paused`, `deployed_version`, `last_seen_sha`/`_version`, `etag`, `health`, `failure_count`, `failing_version`, `broken`, `next_attempt_at`; `deployments`: `version`, `failure_kind`, more triggers (`retry`, `rollback`, `reconcile`, `self_update`) and statuses (`awaiting_approval`, …) |
 
 ### 16.8 Order of work
 
@@ -1163,9 +1194,11 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
    - config package, slog, `serve` / `shell` / one-shot CLI over a control socket, following the server's CLI conventions
    - tests for every package but the builder, CI
    - fixed along the way: B2, B3, B4, B5, B12, B17, B20, S5, S6, S8; partly B13, B14, B16, B18, S3
-2. **Database:**
-   - Admin SQL (by hand, logged).
-   - Goose migrations, the store, `import repos.json`.
+2. **Database — done** (2026-10-06):
+   - Admin SQL as `scripts/db/setup.sql` (by hand, §10.1), URL-only keys in Cove.
+   - Goose migrations `00001`–`00002`, the Postgres store, deploy history (`history`), `lighthouse migrate`, `lighthouse import`.
+   - Integration tests against real Postgres, locally (`scripts/test-db.sh`) and in CI; in-memory and Postgres stores pass the same tests.
+   - Fixed along the way: B15, B16.
 3. **Pipeline:**
    - Prepare, swap and verify (16.3), with rollback.
    - Failure classification, startup (F10).

@@ -15,8 +15,19 @@ import (
 	"github.com/lsariol/coveclient"
 )
 
-// GitHubTokenKey is the Cove key holding Lighthouse's GitHub token.
-const GitHubTokenKey = "LIGHTHOUSE_GITHUB_TOKEN"
+// The Cove keys Lighthouse reads for itself at startup.
+const (
+	GitHubTokenKey         = "LIGHTHOUSE_GITHUB_TOKEN"
+	DatabaseURLKey         = "LIGHTHOUSE_DATABASE_URL"          // lighthouse_app
+	MigratorDatabaseURLKey = "LIGHTHOUSE_MIGRATOR_DATABASE_URL" // lighthouse_migrator
+)
+
+// Secrets are Lighthouse's own secrets.
+type Secrets struct {
+	GitHubToken         string
+	DatabaseURL         string
+	MigratorDatabaseURL string
+}
 
 // Connect makes c ready to use. It loads Lighthouse's token from tokenPath,
 // or fetches it through Cove's bootstrap endpoint and saves it there. While
@@ -61,14 +72,19 @@ func Connect(ctx context.Context, c *coveclient.Client, tokenPath string, retry 
 	return nil
 }
 
-// GitHubToken reads Lighthouse's GitHub token from Cove.
-func GitHubToken(ctx context.Context, c *coveclient.Client) (string, error) {
-	token, err := c.GetSecretContext(ctx, GitHubTokenKey)
+// ReadSecrets reads Lighthouse's own secrets from Cove in one request. If any
+// is missing, the error names every missing key.
+func ReadSecrets(ctx context.Context, c *coveclient.Client) (Secrets, error) {
+	values, err := c.GetSecretsContext(ctx, GitHubTokenKey, DatabaseURLKey, MigratorDatabaseURLKey)
 	switch {
 	case errors.Is(err, coveclient.ErrNotFound):
-		return "", fmt.Errorf("%s isn't in Cove. Create it in the Cove shell (\"create %s <token>\") and restart Lighthouse", GitHubTokenKey, GitHubTokenKey)
+		return Secrets{}, fmt.Errorf("Lighthouse's secrets aren't all in Cove (%v). Create them in the Cove shell (DOCUMENTATION.md §10.1) and restart Lighthouse", err)
 	case err != nil:
-		return "", fmt.Errorf("reading %s from Cove: %w", GitHubTokenKey, err)
+		return Secrets{}, fmt.Errorf("reading Lighthouse's secrets from Cove: %w", err)
 	}
-	return token, nil
+	return Secrets{
+		GitHubToken:         values[GitHubTokenKey],
+		DatabaseURL:         values[DatabaseURLKey],
+		MigratorDatabaseURL: values[MigratorDatabaseURLKey],
+	}, nil
 }

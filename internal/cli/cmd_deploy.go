@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 func (c *CLI) deploy(ctx context.Context, args []string) error {
@@ -92,4 +94,55 @@ func (c *CLI) eachProject(ctx context.Context, verb string, done string, fn func
 		return fmt.Errorf("%d of %d projects failed to %s.", failed, len(projects), verb)
 	}
 	return nil
+}
+
+const defaultHistory = 10
+
+func (c *CLI) history(ctx context.Context, args []string) error {
+	if len(args) < 2 || len(args) > 3 {
+		return usageError{form: "history <name> [count]"}
+	}
+
+	count := defaultHistory
+	if len(args) == 3 {
+		n, err := strconv.Atoi(args[2])
+		if err != nil || n < 1 {
+			return usageError{reason: fmt.Sprintf("%q isn't a positive number.", args[2]), form: "history <name> [count]"}
+		}
+		count = n
+	}
+
+	deploys, err := c.svc.History(ctx, args[1], count)
+	if err != nil {
+		return err
+	}
+	if len(deploys) == 0 {
+		info(fmt.Sprintf("%s hasn't been deployed by this Lighthouse yet.", args[1]))
+		return nil
+	}
+
+	rows := [][]string{{"WHEN", "TRIGGER", "RESULT", "COMMIT", "TOOK", "ERROR"}}
+	for _, d := range deploys {
+		started := d.StartedAt
+		rows = append(rows, []string{
+			ago(&started), d.Trigger, d.Status, shortSHA(d.Commit),
+			d.FinishedAt.Sub(d.StartedAt).Round(time.Second).String(), firstLine(d.Error, 60),
+		})
+	}
+	table(rows)
+	return nil
+}
+
+// firstLine is the first line of s, cut to max characters, or "-".
+func firstLine(s string, max int) string {
+	if s == "" {
+		return "-"
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max-1]) + "…"
+	}
+	return s
 }

@@ -1,7 +1,7 @@
 // Package orchestrator decides when projects deploy: it checks GitHub for new
 // commits on a schedule, deploys the projects that changed, and runs deploys
-// asked for by the CLI. It grows into the v1.0.0 orchestrator (queue,
-// backoff, reconcile loop).
+// asked for by the CLI. Every attempt is recorded in the projects.Store. It
+// grows into the v1.0.0 orchestrator (queue, backoff, reconcile loop).
 package orchestrator
 
 import (
@@ -14,12 +14,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/watchlist"
+	"github.com/LSariol/LightHouse/internal/projects"
 )
 
 // Deployer deploys a project. *deploy.Deployer implements it.
 type Deployer interface {
-	Deploy(ctx context.Context, p watchlist.Project) error
+	Deploy(ctx context.Context, p projects.Project) error
 }
 
 // Commits finds a repository's latest commit. github.Client implements it.
@@ -31,42 +31,24 @@ type Commits interface {
 var ErrScanRunning = errors.New("a scan is already running")
 
 type Orchestrator struct {
-	projects *watchlist.List
+	store    projects.Store
 	commits  Commits
 	deployer Deployer
-
-	mu       sync.Mutex // guards gitToken
 	gitToken string
 
 	scanning sync.Mutex // one scan at a time
 	paused   atomic.Bool
 }
 
-func New(projects *watchlist.List, commits Commits, deployer Deployer) *Orchestrator {
-	return &Orchestrator{projects: projects, commits: commits, deployer: deployer}
+// New returns an Orchestrator that checks with gitToken (Lighthouse's GitHub
+// token, read from Cove at startup).
+func New(store projects.Store, commits Commits, deployer Deployer, gitToken string) *Orchestrator {
+	return &Orchestrator{store: store, commits: commits, deployer: deployer, gitToken: gitToken}
 }
 
 func (o *Orchestrator) Pause()         { o.paused.Store(true) }
 func (o *Orchestrator) Resume()        { o.paused.Store(false) }
 func (o *Orchestrator) IsPaused() bool { return o.paused.Load() }
-
-// SetGitToken sets the GitHub token used to check for commits.
-func (o *Orchestrator) SetGitToken(token string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.gitToken = token
-}
-
-// HasGitToken reports whether a GitHub token has been set.
-func (o *Orchestrator) HasGitToken() bool {
-	return o.token() != ""
-}
-
-func (o *Orchestrator) token() string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.gitToken
-}
 
 // Run scans now and then every interval until ctx is cancelled, skipping
 // scans while paused. A scan's errors are logged; they don't stop the loop.
@@ -97,8 +79,13 @@ func (o *Orchestrator) Scan(ctx context.Context) error {
 	}
 	defer o.scanning.Unlock()
 
+	list, err := o.store.List(ctx)
+	if err != nil {
+		return err
+	}
+
 	var failed []string
-	for _, p := range o.projects.All() {
+	for _, p := range list {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -108,9 +95,6 @@ func (o *Orchestrator) Scan(ctx context.Context) error {
 		}
 	}
 
-	if err := o.projects.Save(); err != nil {
-		return err
-	}
 	if len(failed) > 0 {
 		return fmt.Errorf("failed: %s", strings.Join(failed, ", "))
 	}
@@ -118,50 +102,56 @@ func (o *Orchestrator) Scan(ctx context.Context) error {
 }
 
 // check looks up p's latest commit and deploys it if it's new. A failed
-// deploy doesn't record the commit, so the next scan tries again.
-func (o *Orchestrator) check(ctx context.Context, p watchlist.Project) error {
-	sha, err := o.commits.LatestCommit(ctx, p.APIURL, o.token())
-	if err == nil && sha != p.Commit() {
+// deploy doesn't change the deployed commit, so the next scan tries again.
+func (o *Orchestrator) check(ctx context.Context, p projects.Project) error {
+	sha, err := o.commits.LatestCommit(ctx, p.Repo.APIURL(), o.gitToken)
+	if err == nil && sha != p.DeployedSHA {
 		slog.Info("new commit", "project", p.Name, "sha", short(sha))
-		err = o.deployer.Deploy(ctx, p)
+		err = o.deploy(ctx, p, sha, projects.TriggerCheck)
 	}
 
-	o.projects.Update(p.Name, func(p *watchlist.Project) {
-		p.RecordCheck()
-		switch {
-		case err != nil:
-			p.RecordError(err)
-		case sha != p.Commit():
-			p.RecordDeploy(sha)
-		default:
-			p.ClearError()
-		}
-	})
+	if recErr := o.store.RecordCheck(ctx, p.Name, err); recErr != nil && !errors.Is(recErr, projects.ErrNotFound) {
+		// ErrNotFound: removed while it was being checked; nothing to record.
+		slog.Error("recording a check failed", "project", p.Name, "err", recErr)
+	}
 	return err
 }
 
 // Deploy deploys the project called name now, whether or not its commit
-// changed, and records the commit it deployed.
+// changed.
 func (o *Orchestrator) Deploy(ctx context.Context, name string) error {
-	p, ok := o.projects.Find(name)
-	if !ok {
-		return watchlist.ErrNotFound
+	p, err := o.store.Get(ctx, name)
+	if err != nil {
+		return err
 	}
 
-	sha, err := o.commits.LatestCommit(ctx, p.APIURL, o.token())
-	if err == nil {
-		err = o.deployer.Deploy(ctx, p)
+	sha, err := o.commits.LatestCommit(ctx, p.Repo.APIURL(), o.gitToken)
+	if err != nil {
+		return err
 	}
+	return o.deploy(ctx, p, sha, projects.TriggerManual)
+}
 
-	o.projects.Update(p.Name, func(p *watchlist.Project) {
-		if err != nil {
-			p.RecordError(err)
-		} else {
-			p.RecordDeploy(sha)
-		}
-	})
-	if saveErr := o.projects.Save(); err == nil {
-		err = saveErr
+// deploy runs one deployment of p at sha and records it.
+func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, sha string, trigger string) error {
+	started := time.Now()
+	err := o.deployer.Deploy(ctx, p)
+
+	d := projects.Deployment{
+		Project:    p.Name,
+		SHA:        sha,
+		Trigger:    trigger,
+		Status:     projects.StatusSucceeded,
+		StartedAt:  started,
+		FinishedAt: time.Now(),
+	}
+	if err != nil {
+		d.Status = projects.StatusFailed
+		d.Error = projects.ErrorText(err)
+	}
+	// A context cancelled by shutdown mustn't lose the record.
+	if recErr := o.store.RecordDeployment(context.WithoutCancel(ctx), d); recErr != nil && !errors.Is(recErr, projects.ErrNotFound) {
+		slog.Error("recording a deployment failed", "project", p.Name, "err", recErr)
 	}
 	return err
 }

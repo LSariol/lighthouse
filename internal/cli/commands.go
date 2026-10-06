@@ -158,6 +158,21 @@ func commandTable() []command {
 			complete: namesOrAll,
 		},
 		{
+			names:    []string{"history"},
+			group:    groupDeploying,
+			synopsis: "<name> [count]",
+			summary:  "A project's recent deploys and how they went",
+			usages: []usage{
+				{"history <name> [count]", "List a project's most recent deploys (10 unless given, up to 100), newest first: when, what started it, the commit, how long it took, and why it failed."},
+			},
+			examples: []example{
+				{"history plop", "the last 10"},
+				{"history plop 50", "the last 50"},
+			},
+			run:      (*CLI).history,
+			complete: names,
+		},
+		{
 			names:    []string{"scan"},
 			group:    groupDeploying,
 			summary:  "Check every project for new commits now",
@@ -245,7 +260,7 @@ func commandTable() []command {
 			group:   groupLighthouse,
 			summary: "Is everything healthy?",
 			usages: []usage{
-				{"status", "Show Lighthouse's health (version, startup, Cove, GitHub token, automatic deploys) and every project's container state and last error. Exits non-zero if something needs attention."},
+				{"status", "Show Lighthouse's health (version, startup, Cove, GitHub token, database, automatic deploys) and every project's container state and last error. Exits non-zero if something needs attention."},
 			},
 			run: (*CLI).status,
 		},

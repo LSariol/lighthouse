@@ -25,7 +25,8 @@ func newFake(names ...string) *fakeService {
 	for _, n := range names {
 		f.projects = append(f.projects, control.Project{Name: n, URL: "https://github.com/o/" + n, Container: n, State: "running"})
 	}
-	f.status = control.Status{Version: "v1", Env: "dev", Phase: "running", GitHubToken: true, StartedAt: time.Now(), Projects: f.projects}
+	f.status = control.Status{Version: "v1", Env: "dev", Phase: "running", GitHubToken: true, Database: "reachable",
+		Schema: "version 2 (up to date)", StartedAt: time.Now(), Projects: f.projects}
 	return f
 }
 
@@ -60,6 +61,13 @@ func (f *fakeService) Stop(ctx context.Context, name string) error    { return f
 func (f *fakeService) Restart(ctx context.Context, name string) error { return f.act("restart", name) }
 func (f *fakeService) Logs(ctx context.Context, name string, lines int) (string, error) {
 	return "hello\n", f.act("logs", name)
+}
+func (f *fakeService) History(ctx context.Context, name string, limit int) ([]control.Deployment, error) {
+	start := time.Now().Add(-time.Hour)
+	return []control.Deployment{
+		{Commit: "abcdef123", Trigger: "check", Status: "failed", StartedAt: start, FinishedAt: start.Add(90 * time.Second),
+			Error: "fetch secrets: missing: PLOP_DATABASE_URL\nmore detail"},
+	}, f.act("history", name)
 }
 
 // run executes one command line on a CLI without a terminal and returns its
@@ -272,5 +280,39 @@ func TestTakeYesFlag(t *testing.T) {
 	yes, rest := takeYesFlag([]string{"plop", "-y"})
 	if !yes || len(rest) != 1 || rest[0] != "plop" {
 		t.Errorf("takeYesFlag = %v, %v", yes, rest)
+	}
+}
+
+func TestHistory(t *testing.T) {
+	out, _, err := run(t, newFake("plop"), "history plop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"WHEN", "check", "failed", "abcdef1", "1m30s", "missing: PLOP_DATABASE_URL"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("history output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "more detail") {
+		t.Error("history printed more than the error's first line")
+	}
+
+	var usage usageError
+	if _, _, err := run(t, newFake("plop"), "history plop lots"); !errors.As(err, &usage) {
+		t.Errorf("history with a bad count = %v, want a usage error", err)
+	}
+}
+
+func TestStatusDatabase(t *testing.T) {
+	svc := newFake("plop")
+	out, _, _ := run(t, svc, "status")
+	if !strings.Contains(out, "reachable, schema version 2 (up to date)") {
+		t.Errorf("status doesn't show the database:\n%s", out)
+	}
+
+	svc.status.Database = "unreachable"
+	svc.status.Schema = ""
+	if _, _, err := run(t, svc, "status"); err == nil || !strings.Contains(err.Error(), "database is unreachable") {
+		t.Errorf("status with the database down = %v", err)
 	}
 }

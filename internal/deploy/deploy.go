@@ -13,7 +13,7 @@ import (
 	"sync"
 
 	"github.com/LSariol/LightHouse/internal/docker"
-	"github.com/LSariol/LightHouse/internal/watchlist"
+	"github.com/LSariol/LightHouse/internal/projects"
 	"github.com/lsariol/coveclient"
 )
 
@@ -33,7 +33,7 @@ func New(d *docker.Client, cove *coveclient.Client, stagingPath, downloadPath st
 }
 
 // Deploy deploys p's main branch. A second call waits for the first.
-func (d *Deployer) Deploy(ctx context.Context, p watchlist.Project) error {
+func (d *Deployer) Deploy(ctx context.Context, p projects.Project) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -44,7 +44,7 @@ func (d *Deployer) Deploy(ctx context.Context, p watchlist.Project) error {
 		return fmt.Errorf("clean up: %w", err)
 	}
 
-	archive, err := d.download(p.DownloadURL, p.Repo)
+	archive, err := d.download(p.Repo.ArchiveURL(), p.Repo.Name)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}

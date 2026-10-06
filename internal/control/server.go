@@ -74,6 +74,16 @@ func Handler(svc Service) http.Handler {
 		respond(w, logs, err)
 	})
 
+	mux.HandleFunc("GET /v1/projects/{name}/history", func(w http.ResponseWriter, r *http.Request) {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil {
+			respond(w, nil, Errorf(KindInvalid, "limit must be a number"))
+			return
+		}
+		history, err := svc.History(r.Context(), r.PathValue("name"), limit)
+		respond(w, history, err)
+	})
+
 	global := map[string]func(context.Context) error{
 		"scan":   svc.Scan,
 		"pause":  svc.Pause,

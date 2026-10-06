@@ -32,6 +32,7 @@ type Service interface {
 	Stop(ctx context.Context, name string) error
 	Restart(ctx context.Context, name string) error
 	Logs(ctx context.Context, name string, lines int) (string, error)
+	History(ctx context.Context, name string, limit int) ([]Deployment, error)
 }
 
 // Status is the daemon's health and every project's container state.
@@ -39,11 +40,13 @@ type Status struct {
 	Version      string        `json:"version"`
 	Env          string        `json:"env"`
 	StartedAt    time.Time     `json:"startedAt"`
-	Phase        string        `json:"phase"` // e.g. "running", "waiting for Cove"
+	Phase        string        `json:"phase"` // e.g. "running", "waiting for Cove", "waiting for the database"
 	Paused       bool          `json:"paused"`
 	PollInterval time.Duration `json:"pollInterval"`
 	CoveURL      string        `json:"coveURL"`
 	GitHubToken  bool          `json:"githubToken"` // loaded from Cove
+	Database     string        `json:"database"`    // "reachable", "unreachable", or "" before startup connects
+	Schema       string        `json:"schema"`      // e.g. "version 2 (up to date)"
 	Projects     []Project     `json:"projects"`
 }
 
@@ -60,6 +63,16 @@ type Project struct {
 	Checks        int        `json:"checks"`
 	LastError     string     `json:"lastError,omitempty"`
 	LastErrorAt   *time.Time `json:"lastErrorAt,omitempty"`
+}
+
+// Deployment is one deploy attempt, from the project's history.
+type Deployment struct {
+	Commit     string    `json:"commit,omitempty"`
+	Trigger    string    `json:"trigger"` // "check" or "manual"
+	Status     string    `json:"status"`  // "succeeded" or "failed"
+	StartedAt  time.Time `json:"startedAt"`
+	FinishedAt time.Time `json:"finishedAt"`
+	Error      string    `json:"error,omitempty"`
 }
 
 // Error kinds, mapped to HTTP status codes on the socket.

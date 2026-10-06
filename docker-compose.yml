@@ -8,12 +8,12 @@ services:
     container_name: lighthouse
     environment:
       # Plain settings, written out: Lighthouse is deployed by hand, and none
-      # of these are secrets.
+      # of these are secrets. Its own secrets (the GitHub token and the
+      # database URLs) it reads from Cove at startup.
       - APP_ENV=prod
       - LIGHTHOUSE_VERSION=dev   # set to the release version when releasing
       - COVE_URL=http://cove:2100
       - COVE_TOKEN_PATH=/app/vault/cove/token
-      - APP_REPO_PATH=/app/vault/repos.json
       - STAGING_PATH=/app/server/staging/
       - DOWNLOAD_PATH=/app/server/download/
     volumes:
@@ -21,10 +21,6 @@ services:
       - type: bind
         source: /srv/server/storage/lighthouse/cove
         target: /app/vault/cove
-      # The watchlist. Create it before the first start: echo '[]' > repos.json
-      - type: bind
-        source: /srv/server/storage/lighthouse/repos.json
-        target: /app/vault/repos.json
       # Scratch space, emptied on every deploy.
       - type: bind
         source: /srv/server/staging/

@@ -3,15 +3,15 @@ package daemon
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LSariol/LightHouse/internal/config"
 	"github.com/LSariol/LightHouse/internal/control"
 	"github.com/LSariol/LightHouse/internal/orchestrator"
-	"github.com/LSariol/LightHouse/internal/watchlist"
+	"github.com/LSariol/LightHouse/internal/projects"
+	"github.com/LSariol/LightHouse/internal/projects/projectstest"
 )
 
 // fakeContainers records container actions.
@@ -38,16 +38,22 @@ func (f *fakeContainers) Logs(ctx context.Context, name string, tail int) (strin
 	return "", nil
 }
 
-func newDaemon(t *testing.T) (*Daemon, *fakeContainers) {
+// fakeHealth is a database that answers, at the given schema versions.
+type fakeHealth struct{ have, want int64 }
+
+func (f fakeHealth) Ping(ctx context.Context) error { return nil }
+func (f fakeHealth) SchemaVersion(ctx context.Context) (int64, int64, error) {
+	return f.have, f.want, nil
+}
+
+// newDaemon returns a running daemon on an in-memory store.
+func newDaemon(t *testing.T) (*Daemon, *fakeContainers, *projectstest.Store) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "repos.json")
-	os.WriteFile(path, []byte("[]"), 0o644)
-	list, err := watchlist.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := &projectstest.Store{}
 	c := &fakeContainers{}
-	return New(config.Config{Env: "dev"}, "test", list, orchestrator.New(list, nil, nil), c), c
+	d := New(config.Config{Env: "dev"}, "test", c)
+	d.Ready(store, orchestrator.New(store, nil, nil, "t"), fakeHealth{2, 2})
+	return d, c, store
 }
 
 func kind(err error) string {
@@ -59,7 +65,7 @@ func kind(err error) string {
 }
 
 func TestOnlyWatchedProjectsAreControlled(t *testing.T) {
-	d, c := newDaemon(t)
+	d, c, _ := newDaemon(t)
 	ctx := context.Background()
 
 	if err := d.Stop(ctx, "sparkdb"); kind(err) != control.KindNotFound {
@@ -79,7 +85,7 @@ func TestOnlyWatchedProjectsAreControlled(t *testing.T) {
 }
 
 func TestErrorsExplainTheFix(t *testing.T) {
-	d, _ := newDaemon(t)
+	d, _, _ := newDaemon(t)
 	ctx := context.Background()
 	d.Add(ctx, "plop", "https://github.com/LSariol/plop")
 
@@ -94,6 +100,8 @@ func TestErrorsExplainTheFix(t *testing.T) {
 		{func() error { _, err := d.Add(ctx, "plop", "https://github.com/a/b"); return err }(), control.KindConflict, "already exists"},
 		{func() error { _, err := d.Add(ctx, "x", "https://github.com/LSariol/plop"); return err }(), control.KindConflict, "already watched"},
 		{func() error { _, err := d.Logs(ctx, "plop", 0); return err }(), control.KindInvalid, "between 1 and"},
+		{func() error { _, err := d.History(ctx, "plop", 1000); return err }(), control.KindInvalid, "between 1 and"},
+		{func() error { _, err := d.History(ctx, "nope", 10); return err }(), control.KindNotFound, `"list"`},
 	}
 	for i, c := range cases {
 		if kind(c.err) != c.kind || !strings.Contains(c.err.Error(), c.contains) {
@@ -102,20 +110,55 @@ func TestErrorsExplainTheFix(t *testing.T) {
 	}
 }
 
-func TestDeployWaitsForStartup(t *testing.T) {
-	d, _ := newDaemon(t)
+// Before Ready, everything but status says Lighthouse is starting.
+func TestBeforeReady(t *testing.T) {
+	d := New(config.Config{}, "test", &fakeContainers{})
+	d.SetPhase(PhaseDatabase)
 	ctx := context.Background()
-	d.Add(ctx, "plop", "https://github.com/LSariol/plop")
-	d.SetPhase(PhaseWaiting)
 
-	for name, err := range map[string]error{"deploy": d.Deploy(ctx, "plop"), "scan": d.Scan(ctx)} {
-		if kind(err) != control.KindUnavailable || !strings.Contains(err.Error(), PhaseWaiting) {
-			t.Errorf("%s while waiting for Cove = %v, want unavailable", name, err)
-		}
+	status, err := d.Status(ctx)
+	if err != nil || status.Phase != PhaseDatabase || status.GitHubToken || len(status.Projects) != 0 {
+		t.Errorf("Status = %+v, %v", status, err)
 	}
 
-	status, _ := d.Status(ctx)
-	if status.Phase != PhaseWaiting || len(status.Projects) != 1 || status.Projects[0].State != "running" {
-		t.Errorf("Status = %+v", status)
+	for name, err := range map[string]error{
+		"deploy":   d.Deploy(ctx, "plop"),
+		"scan":     d.Scan(ctx),
+		"pause":    d.Pause(ctx),
+		"remove":   d.Remove(ctx, "plop"),
+		"projects": func() error { _, err := d.Projects(ctx); return err }(),
+	} {
+		if kind(err) != control.KindUnavailable || !strings.Contains(err.Error(), PhaseDatabase) {
+			t.Errorf("%s before Ready = %v, want unavailable naming the phase", name, err)
+		}
+	}
+}
+
+func TestStatusWhenRunning(t *testing.T) {
+	d, _, _ := newDaemon(t)
+	ctx := context.Background()
+	d.Add(ctx, "plop", "https://github.com/LSariol/plop")
+
+	s, err := d.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Phase != PhaseRunning || !s.GitHubToken || s.Database != "reachable" || s.Schema != "version 2 (up to date)" ||
+		len(s.Projects) != 1 || s.Projects[0].State != "running" {
+		t.Errorf("Status = %+v", s)
+	}
+}
+
+func TestHistory(t *testing.T) {
+	d, _, store := newDaemon(t)
+	ctx := context.Background()
+	d.Add(ctx, "plop", "https://github.com/LSariol/plop")
+	now := time.Now()
+	store.RecordDeployment(ctx, projects.Deployment{Project: "plop", SHA: "abc", Trigger: projects.TriggerManual,
+		Status: projects.StatusFailed, StartedAt: now, FinishedAt: now, Error: "build failed"})
+
+	h, err := d.History(ctx, "PLOP", 10)
+	if err != nil || len(h) != 1 || h[0].Commit != "abc" || h[0].Error != "build failed" || h[0].Trigger != "manual" {
+		t.Errorf("History = %+v, %v", h, err)
 	}
 }

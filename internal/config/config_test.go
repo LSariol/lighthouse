@@ -10,7 +10,7 @@ import (
 // APP_ENV_PATH at a file that doesn't exist so a developer's .env is ignored.
 func setEnv(t *testing.T, vars map[string]string) {
 	t.Helper()
-	for _, name := range []string{"COVE_URL", "COVE_TOKEN_PATH", "APP_REPO_PATH", "STAGING_PATH", "DOWNLOAD_PATH",
+	for _, name := range []string{"COVE_URL", "COVE_TOKEN_PATH", "STAGING_PATH", "DOWNLOAD_PATH",
 		"APP_ENV", "LIGHTHOUSE_VERSION", "LIGHTHOUSE_CONTROL_SOCKET", "LIGHTHOUSE_POLL_INTERVAL"} {
 		t.Setenv(name, vars[name])
 	}
@@ -21,7 +21,6 @@ func valid() map[string]string {
 	return map[string]string{
 		"COVE_URL":        "http://cove:2100",
 		"COVE_TOKEN_PATH": "/app/vault/cove/token",
-		"APP_REPO_PATH":   "/app/vault/repos.json",
 		"STAGING_PATH":    "/app/server/staging/",
 		"DOWNLOAD_PATH":   "/app/server/download/",
 		"APP_ENV":         "PROD",
@@ -89,7 +88,7 @@ func TestValidateServeMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("ValidateServe accepted missing settings")
 	}
-	for _, name := range []string{"COVE_TOKEN_PATH", "APP_REPO_PATH", "STAGING_PATH", "DOWNLOAD_PATH"} {
+	for _, name := range []string{"COVE_TOKEN_PATH", "STAGING_PATH", "DOWNLOAD_PATH"} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error %q doesn't name %s", err, name)
 		}
@@ -120,5 +119,18 @@ func TestWorkFolderGuard(t *testing.T) {
 		if err := checkWorkFolder(path); err != nil {
 			t.Errorf("checkWorkFolder(%q) = %v, want nil", path, err)
 		}
+	}
+}
+
+func TestValidateCove(t *testing.T) {
+	setEnv(t, map[string]string{"COVE_URL": "http://cove:2100"})
+	cfg, _ := Load()
+	if err := cfg.ValidateCove(); err == nil || !strings.Contains(err.Error(), "COVE_TOKEN_PATH") {
+		t.Errorf("ValidateCove without a token path = %v", err)
+	}
+	setEnv(t, valid())
+	cfg, _ = Load()
+	if err := cfg.ValidateCove(); err != nil {
+		t.Errorf("ValidateCove = %v", err)
 	}
 }

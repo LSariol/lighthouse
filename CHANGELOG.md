@@ -13,6 +13,7 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 - Logs are structured (`log/slog`) with timestamps.
 - Internal layout, one job per package: `orchestrator` (when to deploy), `deploy` (how), `watchlist` (the projects and their state), `github`, `docker`, `cove` (startup connection). Each is tested on its own.
 - Local development state lives in `.dev/` (gitignored) instead of `config/` and `Server/`.
+- `APP_REPO_PATH` and the `repos.json` mount are gone.
 
 ### Fixed
 - One failing project no longer stops the others from being checked.
@@ -24,6 +25,11 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 - `govulncheck` is clean (the old `docker/docker` and OpenTelemetry advisories are gone).
 
 ### Added
+- **Postgres** (`lighthouse_db` on sparkdb) holds the projects instead of `repos.json`. The schema comes from goose migrations built into the binary and applied at startup as `lighthouse_migrator`; Lighthouse refuses to run on an older schema. The database URLs are read from Cove (`LIGHTHOUSE_DATABASE_URL`, `LIGHTHOUSE_MIGRATOR_DATABASE_URL`).
+- **Deploy history**: every attempt is recorded (trigger, result, commit, times, error); `history <name>` shows it.
+- `lighthouse migrate [status|up]` and `lighthouse import <file|->` (moves a pre-1.0 `repos.json` into the database; safe to run twice).
+- `status` shows the database and schema, and the startup phase while Lighthouse waits for Cove or the database. Lighthouse waits for an unreachable database instead of exiting.
+- Integration tests against real Postgres, locally (`scripts/test-db.sh`) and in CI.
 - `scripts/db/check.sql` and `scripts/db/setup.sql`: the one-time Admin setup of Lighthouse's roles and database on sparkdb (DOCUMENTATION.md §10.1).
 
 ### Removed

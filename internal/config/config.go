@@ -19,7 +19,6 @@ import (
 type Config struct {
 	CoveURL       string        // COVE_URL: Cove's base URL, e.g. http://cove:2100
 	CoveTokenPath string        // COVE_TOKEN_PATH: where Lighthouse's Cove token is kept
-	RepoPath      string        // APP_REPO_PATH: the watchlist file (repos.json)
 	StagingPath   string        // STAGING_PATH: where archives are unpacked; emptied on every deploy
 	DownloadPath  string        // DOWNLOAD_PATH: where archives are downloaded; emptied on every deploy
 	Env           string        // APP_ENV: "dev" or "prod", shown in the shell's prompt
@@ -49,7 +48,6 @@ func Load() (Config, error) {
 	cfg := Config{
 		CoveURL:       env("COVE_URL"),
 		CoveTokenPath: env("COVE_TOKEN_PATH"),
-		RepoPath:      env("APP_REPO_PATH"),
 		StagingPath:   env("STAGING_PATH"),
 		DownloadPath:  env("DOWNLOAD_PATH"),
 		Env:           strings.ToLower(env("APP_ENV")),
@@ -76,13 +74,21 @@ func env(name string) string {
 	return strings.TrimSpace(os.Getenv(name))
 }
 
+// ValidateCove checks the settings needed to reach Cove, for the admin modes
+// (migrate, import) that read Lighthouse's secrets but don't deploy.
+func (c Config) ValidateCove() error {
+	if c.CoveURL == "" || c.CoveTokenPath == "" {
+		return fmt.Errorf("COVE_URL and COVE_TOKEN_PATH must be set. In Docker, run this inside the container: docker exec -i lighthouse /lighthouse ...")
+	}
+	return nil
+}
+
 // ValidateServe checks the settings the daemon needs. The shell and one-shot
 // commands only need ControlSocket, which always has a value.
 func (c Config) ValidateServe() error {
 	required := []struct{ name, value string }{
 		{"COVE_URL", c.CoveURL},
 		{"COVE_TOKEN_PATH", c.CoveTokenPath},
-		{"APP_REPO_PATH", c.RepoPath},
 		{"STAGING_PATH", c.StagingPath},
 		{"DOWNLOAD_PATH", c.DownloadPath},
 	}

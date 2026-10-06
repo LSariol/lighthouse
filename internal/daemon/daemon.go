@@ -1,13 +1,17 @@
 // Package daemon is the running Lighthouse as the CLI sees it: it implements
-// control.Service on top of the watchlist, the orchestrator and Docker, and
-// turns their errors into messages that say how to fix them.
+// control.Service on top of the project store, the orchestrator and Docker,
+// and turns their errors into messages that say how to fix them.
+//
+// The daemon answers from the moment it starts. The store and orchestrator
+// arrive later (Ready), once Cove and the database are reachable; until then
+// `status` shows the startup phase and everything else says it's starting.
 package daemon
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/LSariol/LightHouse/internal/config"
@@ -15,7 +19,7 @@ import (
 	"github.com/LSariol/LightHouse/internal/docker"
 	"github.com/LSariol/LightHouse/internal/github"
 	"github.com/LSariol/LightHouse/internal/orchestrator"
-	"github.com/LSariol/LightHouse/internal/watchlist"
+	"github.com/LSariol/LightHouse/internal/projects"
 )
 
 // Containers starts, stops and inspects containers. *docker.Client
@@ -28,44 +32,108 @@ type Containers interface {
 	Logs(ctx context.Context, name string, tail int) (string, error)
 }
 
-// Phases the daemon goes through at startup, shown by `status`.
-const (
-	PhaseStarting = "starting"
-	PhaseWaiting  = "waiting for Cove"
-	PhaseRunning  = "running"
-)
-
-// MaxLogLines is the most lines `logs` returns.
-const MaxLogLines = 10000
-
-type Daemon struct {
-	cfg          config.Config
-	version      string
-	projects     *watchlist.List
-	orchestrator *orchestrator.Orchestrator
-	containers   Containers
-	started      time.Time
-	phase        atomic.Value // string
+// Health reports on the database for `status`. *database.Database
+// implements it.
+type Health interface {
+	Ping(ctx context.Context) error
+	SchemaVersion(ctx context.Context) (have int64, want int64, err error)
 }
 
-func New(cfg config.Config, version string, projects *watchlist.List, o *orchestrator.Orchestrator, c Containers) *Daemon {
-	d := &Daemon{cfg: cfg, version: version, projects: projects, orchestrator: o, containers: c, started: time.Now()}
-	d.phase.Store(PhaseStarting)
-	return d
+// Phases the daemon goes through at startup, shown by `status`.
+const (
+	PhaseStarting  = "starting"
+	PhaseWaiting   = "waiting for Cove"
+	PhaseDatabase  = "waiting for the database"
+	PhaseMigrating = "migrating the database"
+	PhaseRunning   = "running"
+)
+
+const (
+	MaxLogLines     = 10000 // the most lines `logs` returns
+	MaxHistoryLimit = 100   // the most deployments `history` returns
+)
+
+type Daemon struct {
+	cfg        config.Config
+	version    string
+	containers Containers
+	started    time.Time
+
+	mu           sync.RWMutex
+	phase        string
+	store        projects.Store
+	orchestrator *orchestrator.Orchestrator
+	health       Health
+}
+
+func New(cfg config.Config, version string, c Containers) *Daemon {
+	return &Daemon{cfg: cfg, version: version, containers: c, started: time.Now(), phase: PhaseStarting}
 }
 
 // SetPhase records how far startup has got.
-func (d *Daemon) SetPhase(phase string) { d.phase.Store(phase) }
+func (d *Daemon) SetPhase(phase string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.phase = phase
+}
 
-func (d *Daemon) running() error {
-	if phase := d.phase.Load().(string); phase != PhaseRunning {
-		return control.Errorf(control.KindUnavailable, "Lighthouse is still starting (%s). \"status\" shows progress; \"docker logs lighthouse\" says what it's waiting for.", phase)
+// Ready hands the daemon its store and orchestrator, once startup has
+// connected everything, and marks it running.
+func (d *Daemon) Ready(store projects.Store, o *orchestrator.Orchestrator, health Health) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.store, d.orchestrator, d.health = store, o, health
+	d.phase = PhaseRunning
+}
+
+// parts returns the store and orchestrator, or an unavailable error while
+// Lighthouse is still starting.
+func (d *Daemon) parts() (projects.Store, *orchestrator.Orchestrator, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.store == nil {
+		return nil, nil, control.Errorf(control.KindUnavailable, "Lighthouse is still starting (%s). \"status\" shows progress; \"docker logs lighthouse\" says what it's waiting for.", d.phase)
 	}
-	return nil
+	return d.store, d.orchestrator, nil
 }
 
 func (d *Daemon) Status(ctx context.Context) (control.Status, error) {
-	projects, _ := d.Projects(ctx)
+	d.mu.RLock()
+	phase, health, o := d.phase, d.health, d.orchestrator
+	d.mu.RUnlock()
+
+	s := control.Status{
+		Version:      d.version,
+		Env:          d.cfg.Env,
+		StartedAt:    d.started,
+		Phase:        phase,
+		PollInterval: d.cfg.PollInterval,
+		CoveURL:      d.cfg.CoveURL,
+	}
+	if o == nil {
+		return s, nil
+	}
+	s.Paused = o.IsPaused()
+	s.GitHubToken = true // the orchestrator exists only once it was read
+
+	s.Database = "reachable"
+	if err := health.Ping(ctx); err != nil {
+		s.Database = "unreachable"
+		return s, nil
+	}
+	switch have, want, err := health.SchemaVersion(ctx); {
+	case err != nil:
+		s.Schema = "unknown"
+	case have < want:
+		s.Schema = fmt.Sprintf("version %d (this Lighthouse needs %d)", have, want)
+	default:
+		s.Schema = fmt.Sprintf("version %d (up to date)", have)
+	}
+
+	projects, err := d.Projects(ctx)
+	if err != nil {
+		return s, err
+	}
 	for i := range projects {
 		state, err := d.containers.State(ctx, projects[i].Container)
 		if err != nil {
@@ -73,46 +141,51 @@ func (d *Daemon) Status(ctx context.Context) (control.Status, error) {
 		}
 		projects[i].State = state
 	}
-
-	return control.Status{
-		Version:      d.version,
-		Env:          d.cfg.Env,
-		StartedAt:    d.started,
-		Phase:        d.phase.Load().(string),
-		Paused:       d.orchestrator.IsPaused(),
-		PollInterval: d.cfg.PollInterval,
-		CoveURL:      d.cfg.CoveURL,
-		GitHubToken:  d.orchestrator.HasGitToken(),
-		Projects:     projects,
-	}, nil
+	s.Projects = projects
+	return s, nil
 }
 
 func (d *Daemon) Projects(ctx context.Context) ([]control.Project, error) {
-	all := d.projects.All()
-	projects := make([]control.Project, 0, len(all))
-	for _, p := range all {
-		projects = append(projects, toProject(p))
+	store, _, err := d.parts()
+	if err != nil {
+		return nil, err
 	}
-	return projects, nil
+	list, err := store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]control.Project, 0, len(list))
+	for _, p := range list {
+		out = append(out, toProject(p))
+	}
+	return out, nil
 }
 
-func toProject(p watchlist.Project) control.Project {
+func toProject(p projects.Project) control.Project {
 	return control.Project{
 		Name:          p.Name,
-		URL:           p.URL,
+		URL:           p.Repo.URL(),
 		Container:     p.Container(),
-		Commit:        p.Commit(),
-		WatchingSince: p.Stats.Meta.StartedWatchingAt,
-		LastDeployed:  p.Stats.Updates.LastUpdatedAt,
-		LastChecked:   p.Stats.Queries.LastQueriedAt,
-		Checks:        p.Stats.Queries.QueryCount,
-		LastError:     p.LastError(),
-		LastErrorAt:   p.Stats.Queries.LastErrorAt,
+		Commit:        p.DeployedSHA,
+		WatchingSince: p.CreatedAt,
+		LastDeployed:  p.DeployedAt,
+		LastChecked:   p.LastCheckedAt,
+		Checks:        int(p.Checks),
+		LastError:     p.LastError,
+		LastErrorAt:   p.LastErrorAt,
 	}
 }
 
 func (d *Daemon) Add(ctx context.Context, name string, url string) (control.Project, error) {
-	p, err := d.projects.Add(name, url)
+	store, _, err := d.parts()
+	if err != nil {
+		return control.Project{}, err
+	}
+	repo, err := github.ParseRepoURL(url)
+	if err != nil {
+		return control.Project{}, projectError(err, name, url)
+	}
+	p, err := store.Add(ctx, name, repo)
 	if err != nil {
 		return control.Project{}, projectError(err, name, url)
 	}
@@ -120,35 +193,51 @@ func (d *Daemon) Add(ctx context.Context, name string, url string) (control.Proj
 }
 
 func (d *Daemon) Remove(ctx context.Context, name string) error {
-	return projectError(d.projects.Remove(name), name, "")
+	store, _, err := d.parts()
+	if err != nil {
+		return err
+	}
+	return projectError(store.Remove(ctx, name), name, "")
 }
 
 func (d *Daemon) Rename(ctx context.Context, name string, newName string) error {
-	err := d.projects.Rename(name, newName)
-	if errors.Is(err, watchlist.ErrNameTaken) || errors.Is(err, watchlist.ErrInvalidName) {
+	store, _, err := d.parts()
+	if err != nil {
+		return err
+	}
+	err = store.Rename(ctx, name, newName)
+	if errors.Is(err, projects.ErrNameTaken) || errors.Is(err, projects.ErrInvalidName) {
 		return projectError(err, newName, "")
 	}
 	return projectError(err, name, "")
 }
 
 func (d *Daemon) SetURL(ctx context.Context, name string, url string) error {
-	return projectError(d.projects.SetURL(name, url), name, url)
+	store, _, err := d.parts()
+	if err != nil {
+		return err
+	}
+	repo, err := github.ParseRepoURL(url)
+	if err != nil {
+		return projectError(err, name, url)
+	}
+	return projectError(store.SetRepo(ctx, name, repo), name, url)
 }
 
-// projectError turns a watchlist error into a message that says how to fix it.
+// projectError turns a store error into a message that says how to fix it.
 func projectError(err error, name string, url string) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, watchlist.ErrNotFound):
+	case errors.Is(err, projects.ErrNotFound):
 		return control.Errorf(control.KindNotFound, "No project named %q. \"list\" shows the watched projects.", name)
-	case errors.Is(err, watchlist.ErrNameTaken):
+	case errors.Is(err, projects.ErrNameTaken):
 		return control.Errorf(control.KindConflict, "A project named %q already exists. Pick another name.", name)
-	case errors.Is(err, watchlist.ErrInvalidName):
+	case errors.Is(err, projects.ErrInvalidName):
 		return control.Errorf(control.KindInvalid, "%q isn't a valid project name: use letters, digits, - and _ (up to 64), starting with a letter or digit.", name)
 	case errors.Is(err, github.ErrInvalidURL):
 		return control.Errorf(control.KindInvalid, "%q isn't a GitHub repository URL. Use https://github.com/<owner>/<repo>.", url)
-	case errors.Is(err, watchlist.ErrURLWatched):
+	case errors.Is(err, projects.ErrRepoWatched):
 		return control.Errorf(control.KindConflict, "%s is already watched under another name. \"list\" shows which.", url)
 	default:
 		return err
@@ -156,32 +245,38 @@ func projectError(err error, name string, url string) error {
 }
 
 // find returns the project called name, or a not-found error.
-func (d *Daemon) find(name string) (watchlist.Project, error) {
-	p, ok := d.projects.Find(name)
-	if !ok {
-		return p, projectError(watchlist.ErrNotFound, name, "")
+func (d *Daemon) find(ctx context.Context, name string) (projects.Project, error) {
+	store, _, err := d.parts()
+	if err != nil {
+		return projects.Project{}, err
+	}
+	p, err := store.Get(ctx, name)
+	if err != nil {
+		return p, projectError(err, name, "")
 	}
 	return p, nil
 }
 
 func (d *Daemon) Deploy(ctx context.Context, name string) error {
-	if err := d.running(); err != nil {
+	_, o, err := d.parts()
+	if err != nil {
 		return err
 	}
-	if _, err := d.find(name); err != nil {
+	if _, err := d.find(ctx, name); err != nil {
 		return err
 	}
-	if err := d.orchestrator.Deploy(ctx, name); err != nil {
-		return control.Errorf(control.KindInternal, "Deploying %s failed: %v. \"docker logs lighthouse\" has the full output.", name, err)
+	if err := o.Deploy(ctx, name); err != nil {
+		return control.Errorf(control.KindInternal, "Deploying %s failed: %v. \"history %s\" lists the attempts; \"docker logs lighthouse\" has the full output.", name, err, name)
 	}
 	return nil
 }
 
 func (d *Daemon) Scan(ctx context.Context) error {
-	if err := d.running(); err != nil {
+	_, o, err := d.parts()
+	if err != nil {
 		return err
 	}
-	err := d.orchestrator.Scan(ctx)
+	err = o.Scan(ctx)
 	switch {
 	case errors.Is(err, orchestrator.ErrScanRunning):
 		return control.Errorf(control.KindConflict, "A scan is already running. Try again when it's done.")
@@ -192,13 +287,43 @@ func (d *Daemon) Scan(ctx context.Context) error {
 }
 
 func (d *Daemon) Pause(ctx context.Context) error {
-	d.orchestrator.Pause()
+	_, o, err := d.parts()
+	if err != nil {
+		return err
+	}
+	o.Pause()
 	return nil
 }
 
 func (d *Daemon) Resume(ctx context.Context) error {
-	d.orchestrator.Resume()
+	_, o, err := d.parts()
+	if err != nil {
+		return err
+	}
+	o.Resume()
 	return nil
+}
+
+func (d *Daemon) History(ctx context.Context, name string, limit int) ([]control.Deployment, error) {
+	if limit < 1 || limit > MaxHistoryLimit {
+		return nil, control.Errorf(control.KindInvalid, "The count must be between 1 and %d.", MaxHistoryLimit)
+	}
+	store, _, err := d.parts()
+	if err != nil {
+		return nil, err
+	}
+	history, err := store.History(ctx, name, limit)
+	if err != nil {
+		return nil, projectError(err, name, "")
+	}
+	out := make([]control.Deployment, 0, len(history))
+	for _, h := range history {
+		out = append(out, control.Deployment{
+			Commit: h.SHA, Trigger: h.Trigger, Status: h.Status,
+			StartedAt: h.StartedAt, FinishedAt: h.FinishedAt, Error: h.Error,
+		})
+	}
+	return out, nil
 }
 
 func (d *Daemon) Start(ctx context.Context, name string) error {
@@ -216,7 +341,7 @@ func (d *Daemon) Restart(ctx context.Context, name string) error {
 // containerAction runs fn on a project's container. Only watched projects'
 // containers can be controlled, never other containers on the host.
 func (d *Daemon) containerAction(ctx context.Context, name string, verb string, fn func(context.Context, string) error) error {
-	p, err := d.find(name)
+	p, err := d.find(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -234,7 +359,7 @@ func (d *Daemon) Logs(ctx context.Context, name string, lines int) (string, erro
 	if lines < 1 || lines > MaxLogLines {
 		return "", control.Errorf(control.KindInvalid, "Lines must be between 1 and %d.", MaxLogLines)
 	}
-	p, err := d.find(name)
+	p, err := d.find(ctx, name)
 	if err != nil {
 		return "", err
 	}

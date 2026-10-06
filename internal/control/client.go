@@ -160,6 +160,12 @@ func (c *Client) Logs(ctx context.Context, name string, lines int) (string, erro
 	return logs, err
 }
 
+func (c *Client) History(ctx context.Context, name string, limit int) ([]Deployment, error) {
+	var history []Deployment
+	err := c.call(ctx, http.MethodGet, project(name)+"/history?limit="+strconv.Itoa(limit), nil, &history)
+	return history, err
+}
+
 func (c *Client) Scan(ctx context.Context) error {
 	return c.call(ctx, http.MethodPost, "/v1/scan", nil, nil)
 }

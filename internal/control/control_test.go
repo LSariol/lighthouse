@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,6 +66,10 @@ func (f *fakeService) Logs(ctx context.Context, name string, lines int) (string,
 	f.record("logs " + name)
 	return "line 1\nline 2\n", nil
 }
+func (f *fakeService) History(ctx context.Context, name string, limit int) ([]Deployment, error) {
+	f.record(fmt.Sprintf("history %s %d", name, limit))
+	return []Deployment{{Commit: "abc", Trigger: "manual", Status: "failed", Error: "build failed"}}, nil
+}
 
 // serve starts Serve on a socket in a temp folder and returns a Client for it.
 func serve(t *testing.T, svc Service) (*Client, string) {
@@ -118,6 +123,11 @@ func TestRoundTrip(t *testing.T) {
 		t.Errorf("Logs = %q, %v", logs, err)
 	}
 
+	history, err := c.History(ctx, "plop", 5)
+	if err != nil || len(history) != 1 || history[0].Error != "build failed" {
+		t.Errorf("History = %+v, %v", history, err)
+	}
+
 	for _, call := range []func() error{
 		func() error { return c.Rename(ctx, "plop", "plop2") },
 		func() error { return c.SetURL(ctx, "plop", "https://github.com/a/b") },
@@ -133,7 +143,7 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 
-	want := []string{"add new https://github.com/a/new", "logs plop", "rename plop plop2", "set-url plop https://github.com/a/b",
+	want := []string{"add new https://github.com/a/new", "logs plop", "history plop 5", "rename plop plop2", "set-url plop https://github.com/a/b",
 		"start plop", "stop plop", "restart plop", "scan", "pause", "resume"}
 	if len(svc.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", svc.calls, want)

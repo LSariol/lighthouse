@@ -15,7 +15,8 @@ It's built for one person running their own projects on their own hardware: a ho
 - **Watches your repos.** Every few seconds it checks whether `main` has a new commit.
 - **Deploys automatically.** New commit → download → `docker compose up --build`. Your project is running the new version a minute later.
 - **Keeps secrets out of your code.** Your project's `docker-compose.yml` names the secrets it needs, like `${MYAPP_DATABASE_URL}`. Lighthouse fetches them from [Cove](https://github.com/LSariol/Cove), a small self-hosted vault, at deploy time. Nothing secret lives in the repo or on disk, and your app only reads normal environment variables.
-- **Gives you a control panel.** A simple command prompt to list projects, see what's running, read logs, force a rebuild, or pause deploys.
+- **Gives you a control panel.** A simple command prompt to list projects, see what's running, read logs, redeploy, see how past deploys went, or pause deploys.
+- **Remembers what happened.** Every deploy is recorded in a small Postgres database, so you can see when something changed and why a deploy failed.
 
 ## How it fits together
 
@@ -76,7 +77,7 @@ That's it. The next push to `main` deploys it. The full list of rules (naming, s
 
 ## Running Lighthouse
 
-You'll need a Linux server with Docker and Docker Compose, a running [Cove](https://github.com/LSariol/Cove), and a GitHub personal access token with read-only access to your repos.
+You'll need a Linux server with Docker and Docker Compose, a Postgres server for Lighthouse's own small database, a running [Cove](https://github.com/LSariol/Cove), and a GitHub personal access token with read-only access to your repos. The one-time database setup is a script; [DOCUMENTATION.md §10.1](DOCUMENTATION.md#101-database-setup-once-by-hand) walks through it.
 
 1. **In Cove**, give Lighthouse access and store your GitHub token:
    ```
@@ -108,6 +109,7 @@ On its first start Lighthouse picks up its Cove access automatically. After that
 | `remove <name>` | Stop watching a project |
 | `deploy <name>` | Deploy now, even with no new commit |
 | `logs <name>` | Show a project's recent output |
+| `history <name>` | How its recent deploys went |
 | `pause` / `resume` | Hold all deploys / carry on |
 | `help` | Everything else, with examples (`help setup` walks through preparing a repo) |
 

@@ -4,16 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/LSariol/LightHouse/internal/watchlist"
+	"github.com/LSariol/LightHouse/internal/github"
+	"github.com/LSariol/LightHouse/internal/projects"
+	"github.com/LSariol/LightHouse/internal/projects/projectstest"
 )
 
-// fakeCommits answers with a fixed commit per API URL; others fail.
+// fakeCommits answers with a fixed commit per repository name; others fail.
 type fakeCommits map[string]string
 
 func (f fakeCommits) LatestCommit(ctx context.Context, apiURL string, token string) (string, error) {
@@ -33,10 +33,10 @@ type fakeDeployer struct {
 	mu       sync.Mutex
 	deployed []string
 	fail     map[string]bool
-	during   func(p watchlist.Project) // runs inside each deploy
+	during   func(p projects.Project) // runs inside each deploy
 }
 
-func (f *fakeDeployer) Deploy(ctx context.Context, p watchlist.Project) error {
+func (f *fakeDeployer) Deploy(ctx context.Context, p projects.Project) error {
 	if f.during != nil {
 		f.during(p)
 	}
@@ -49,77 +49,87 @@ func (f *fakeDeployer) Deploy(ctx context.Context, p watchlist.Project) error {
 	return nil
 }
 
-func setup(t *testing.T, commits fakeCommits, names ...string) (*Orchestrator, *watchlist.List, *fakeDeployer) {
+func setup(t *testing.T, commits fakeCommits, names ...string) (*Orchestrator, *projectstest.Store, *fakeDeployer) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "repos.json")
-	os.WriteFile(path, []byte("[]"), 0o644)
-	list, err := watchlist.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := &projectstest.Store{}
 	for _, name := range names {
-		if _, err := list.Add(name, "https://github.com/o/"+name); err != nil {
+		if _, err := store.Add(context.Background(), name, github.Repo{Owner: "o", Name: name}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	d := &fakeDeployer{fail: map[string]bool{}}
-	o := New(list, commits, d)
-	o.SetGitToken("t")
-	return o, list, d
+	return New(store, commits, d, "t"), store, d
+}
+
+func get(t *testing.T, s projects.Store, name string) projects.Project {
+	t.Helper()
+	p, err := s.Get(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestScanDeploysNewCommitsAndSkipsFailures(t *testing.T) {
 	// "b" doesn't exist on GitHub: the projects after it are still checked.
-	o, list, d := setup(t, fakeCommits{"a": "aaa", "c": "ccc"}, "a", "b", "c")
+	o, store, d := setup(t, fakeCommits{"a": "aaa", "c": "ccc"}, "a", "b", "c")
+	ctx := context.Background()
 
-	err := o.Scan(context.Background())
+	err := o.Scan(ctx)
 	if err == nil || !strings.Contains(err.Error(), "b") {
 		t.Errorf("Scan = %v, want an error naming b", err)
 	}
 	if strings.Join(d.deployed, ",") != "a,c" {
 		t.Errorf("deployed %v, want [a c]", d.deployed)
 	}
-	if b, _ := list.Find("b"); b.LastError() == "" {
-		t.Error("b's error wasn't recorded")
+	if b := get(t, store, "b"); b.LastError == "" || b.Checks != 1 {
+		t.Errorf("b: error %q, %d checks", b.LastError, b.Checks)
 	}
-	if a, _ := list.Find("a"); a.Commit() != "aaa" || a.Stats.Queries.QueryCount != 1 {
-		t.Errorf("a: commit %q, %d checks", a.Commit(), a.Stats.Queries.QueryCount)
+	if a := get(t, store, "a"); a.DeployedSHA != "aaa" || a.Checks != 1 || a.LastError != "" {
+		t.Errorf("a: %+v", a)
+	}
+	if h, _ := store.History(ctx, "a", 10); len(h) != 1 || h[0].Trigger != projects.TriggerCheck || h[0].Status != projects.StatusSucceeded || h[0].SHA != "aaa" {
+		t.Errorf("a's history = %+v", h)
 	}
 
 	// Nothing changed on GitHub: nothing deploys again.
 	d.deployed = nil
-	o.Scan(context.Background())
+	o.Scan(ctx)
 	if len(d.deployed) != 0 {
 		t.Errorf("second scan deployed %v", d.deployed)
 	}
 }
 
 func TestFailedDeployIsRetried(t *testing.T) {
-	o, list, d := setup(t, fakeCommits{"a": "aaa"}, "a")
+	o, store, d := setup(t, fakeCommits{"a": "aaa"}, "a")
 	d.fail["a"] = true
+	ctx := context.Background()
 
-	o.Scan(context.Background())
-	a, _ := list.Find("a")
-	if a.Commit() != "" || a.LastError() == "" {
-		t.Errorf("after a failed deploy: commit %q, error %q", a.Commit(), a.LastError())
+	o.Scan(ctx)
+	if a := get(t, store, "a"); a.DeployedSHA != "" || !strings.Contains(a.LastError, "build of a failed") {
+		t.Errorf("after a failed deploy: %+v", a)
 	}
 
 	d.fail["a"] = false
-	if err := o.Scan(context.Background()); err != nil {
+	if err := o.Scan(ctx); err != nil {
 		t.Fatal(err)
 	}
-	a, _ = list.Find("a")
-	if a.Commit() != "aaa" || a.LastError() != "" {
-		t.Errorf("after a successful deploy: commit %q, error %q", a.Commit(), a.LastError())
+	if a := get(t, store, "a"); a.DeployedSHA != "aaa" || a.LastError != "" {
+		t.Errorf("after a successful deploy: %+v", a)
 	}
-	if len(d.deployed) != 2 {
-		t.Errorf("deployed %v, want two attempts", d.deployed)
+
+	h, _ := store.History(ctx, "a", 10)
+	if len(h) != 2 || h[0].Status != projects.StatusSucceeded || h[1].Status != projects.StatusFailed || h[1].Error == "" {
+		t.Errorf("history = %+v", h)
 	}
 }
 
 func TestNoDeployWithoutToken(t *testing.T) {
-	o, _, d := setup(t, fakeCommits{"a": "aaa"}, "a")
-	o.SetGitToken("")
+	store := &projectstest.Store{}
+	store.Add(context.Background(), "a", github.Repo{Owner: "o", Name: "a"})
+	d := &fakeDeployer{}
+	o := New(store, fakeCommits{"a": "aaa"}, d, "")
+
 	if err := o.Scan(context.Background()); err == nil {
 		t.Error("Scan without a GitHub token succeeded")
 	}
@@ -137,43 +147,46 @@ func TestOneScanAtATime(t *testing.T) {
 	}
 }
 
-// Removing a project while a scan runs must not touch another project's
-// entry (the pre-1.0 code wrote results back by position).
+// Removing a project while it deploys must not fail the scan or touch
+// another project.
 func TestRemoveDuringScan(t *testing.T) {
-	o, list, d := setup(t, fakeCommits{"a": "aaa", "b": "bbb"}, "a", "b")
-	d.during = func(p watchlist.Project) {
+	o, store, d := setup(t, fakeCommits{"a": "aaa", "b": "bbb"}, "a", "b")
+	d.during = func(p projects.Project) {
 		if p.Name == "a" {
-			list.Remove("a")
+			store.Remove(context.Background(), "a")
 		}
 	}
 
-	o.Scan(context.Background())
-
-	all := list.All()
-	if len(all) != 1 || all[0].Name != "b" || all[0].Commit() != "bbb" {
-		t.Fatalf("watchlist = %+v, want only b at bbb", all)
+	if err := o.Scan(context.Background()); err != nil {
+		t.Errorf("Scan = %v", err)
+	}
+	list, _ := store.List(context.Background())
+	if len(list) != 1 || list[0].Name != "b" || list[0].DeployedSHA != "bbb" {
+		t.Fatalf("projects = %+v, want only b at bbb", list)
 	}
 }
 
 func TestDeployNow(t *testing.T) {
-	o, list, d := setup(t, fakeCommits{"a": "aaa"}, "a")
+	o, store, d := setup(t, fakeCommits{"a": "aaa"}, "a")
+	ctx := context.Background()
 
-	if err := o.Deploy(context.Background(), "A"); err != nil {
+	if err := o.Deploy(ctx, "A"); err != nil {
 		t.Fatal(err)
 	}
-	if a, _ := list.Find("a"); a.Commit() != "aaa" {
-		t.Errorf("commit after Deploy = %q", a.Commit())
+	if a := get(t, store, "a"); a.DeployedSHA != "aaa" {
+		t.Errorf("deployed %q", a.DeployedSHA)
 	}
 
 	d.fail["a"] = true
-	if err := o.Deploy(context.Background(), "a"); err == nil {
+	if err := o.Deploy(ctx, "a"); err == nil {
 		t.Error("a failing Deploy returned no error")
 	}
-	if a, _ := list.Find("a"); a.LastError() == "" {
-		t.Error("the failed Deploy wasn't recorded")
+	h, _ := store.History(ctx, "a", 10)
+	if len(h) != 2 || h[0].Trigger != projects.TriggerManual || h[0].Status != projects.StatusFailed {
+		t.Errorf("history = %+v", h)
 	}
 
-	if err := o.Deploy(context.Background(), "nope"); !errors.Is(err, watchlist.ErrNotFound) {
+	if err := o.Deploy(ctx, "nope"); !errors.Is(err, projects.ErrNotFound) {
 		t.Errorf("Deploy of an unknown project = %v", err)
 	}
 }

@@ -40,6 +40,17 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 		}
 	}
 
+	database := orDash(s.Database)
+	switch {
+	case s.Database == "unreachable":
+		problems = append(problems, "the database is unreachable")
+	case strings.Contains(s.Schema, "needs"):
+		problems = append(problems, "database migrations are missing")
+	}
+	if s.Schema != "" {
+		database += ", schema " + s.Schema
+	}
+
 	up := time.Since(s.StartedAt).Round(time.Second)
 	table([][]string{
 		{"Version", orDash(s.Version)},
@@ -48,9 +59,13 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 		{"Automatic deploys", deploys},
 		{"Cove", orDash(s.CoveURL)},
 		{"GitHub token", token},
+		{"Database", database},
 	})
 
-	if len(s.Projects) == 0 {
+	if s.Phase != "running" {
+		out("")
+		info("Projects are shown once Lighthouse is running.")
+	} else if len(s.Projects) == 0 {
 		out("")
 		info("No projects are watched yet. Add one with \"add <name> <url>\".")
 	} else {
