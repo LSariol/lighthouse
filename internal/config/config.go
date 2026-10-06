@@ -93,12 +93,12 @@ func (c Config) ValidateServe() error {
 		}
 	}
 	if len(missing) > 0 {
-		verb := "are"
+		verb, pronoun := "are", "them"
 		if len(missing) == 1 {
-			verb = "is"
+			verb, pronoun = "is", "it"
 		}
-		return fmt.Errorf("%s %s not set. In Docker, set it in docker-compose.yml's environment; locally, in .env (see .env.example)",
-			strings.Join(missing, ", "), verb)
+		return fmt.Errorf("%s %s not set. In Docker, set %s in docker-compose.yml's environment; locally, in .env (see .env.example)",
+			strings.Join(missing, ", "), verb, pronoun)
 	}
 
 	if !strings.HasPrefix(c.CoveURL, "http://") && !strings.HasPrefix(c.CoveURL, "https://") {
