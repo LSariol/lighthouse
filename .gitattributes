@@ -1,2 +1,5 @@
-# Go source is always LF, so gofmt agrees on Windows and in CI.
-*.go text eol=lf
+# Go source, SQL and shell scripts are always LF: gofmt agrees on Windows and
+# in CI, and psql and sh on the server never see a stray carriage return.
+*.go  text eol=lf
+*.sql text eol=lf
+*.sh  text eol=lf

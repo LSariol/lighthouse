@@ -8,25 +8,24 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
 	"time"
 
-	"github.com/LSariol/LightHouse/internal/builder"
 	"github.com/LSariol/LightHouse/internal/cli"
 	"github.com/LSariol/LightHouse/internal/config"
 	"github.com/LSariol/LightHouse/internal/control"
+	"github.com/LSariol/LightHouse/internal/cove"
 	"github.com/LSariol/LightHouse/internal/daemon"
-	"github.com/LSariol/LightHouse/internal/watcher"
+	"github.com/LSariol/LightHouse/internal/deploy"
+	"github.com/LSariol/LightHouse/internal/docker"
+	"github.com/LSariol/LightHouse/internal/github"
+	"github.com/LSariol/LightHouse/internal/orchestrator"
+	"github.com/LSariol/LightHouse/internal/watchlist"
 	"github.com/lsariol/coveclient"
-	"github.com/moby/moby/client"
 )
-
-// githubTokenKey is the Cove key holding Lighthouse's GitHub token.
-const githubTokenKey = "LIGHTHOUSE_GITHUB_TOKEN"
 
 func main() {
 	args := os.Args[1:]
@@ -77,20 +76,21 @@ func runServe() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	docker, err := client.New(client.FromEnv)
+	dockerClient, err := docker.New()
 	if err != nil {
-		fatal(fmt.Errorf("Docker client: %w", err))
+		fatal(err)
 	}
-	defer docker.Close()
+	defer dockerClient.Close()
 
-	cove := coveclient.New(cfg.CoveURL, "")
-	b := builder.New(docker, cove, cfg.StagingPath, cfg.DownloadPath)
-	w := watcher.New(&http.Client{Timeout: 30 * time.Second}, b, cfg.RepoPath)
-	if err := w.Load(); err != nil {
+	projects, err := watchlist.Load(cfg.RepoPath)
+	if err != nil {
 		fatal(watchlistError(cfg.RepoPath, err))
 	}
 
-	d := daemon.New(cfg, version, w, b)
+	coveClient := coveclient.New(cfg.CoveURL, "")
+	deployer := deploy.New(dockerClient, coveClient, cfg.StagingPath, cfg.DownloadPath)
+	orch := orchestrator.New(projects, github.Client{HTTP: &http.Client{Timeout: 30 * time.Second}}, deployer)
+	d := daemon.New(cfg, version, projects, orch, dockerClient)
 
 	// The CLI can connect right away, so `status` shows startup progress
 	// while Lighthouse waits for Cove.
@@ -102,18 +102,18 @@ func runServe() {
 		defer close(loopDone)
 
 		d.SetPhase(daemon.PhaseWaiting)
-		token, err := connectCove(ctx, cove, cfg.CoveTokenPath)
+		token, err := connectCove(ctx, coveClient, cfg.CoveTokenPath)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			fatalServe(cfg, err)
 		}
-		w.SetGitToken(token)
+		orch.SetGitToken(token)
 
 		d.SetPhase(daemon.PhaseRunning)
-		slog.Info("Lighthouse ready", "projects", len(w.Repos()), "poll_interval", cfg.PollInterval.String(), "control_socket", cfg.ControlSocket)
-		w.Run(ctx, cfg.PollInterval)
+		slog.Info("Lighthouse ready", "projects", len(projects.All()), "poll_interval", cfg.PollInterval.String(), "control_socket", cfg.ControlSocket)
+		orch.Run(ctx, cfg.PollInterval)
 	}()
 
 	select {
@@ -134,52 +134,14 @@ func runServe() {
 	slog.Info("Lighthouse stopped")
 }
 
-// connectCove gets Lighthouse's Cove token (fetching it through Cove's
-// bootstrap endpoint the first time), waits until Cove is ready, checks the
-// token, and returns the GitHub token stored in Cove. While Cove is
-// unreachable or the bootstrap endpoint is closed, it keeps retrying.
-func connectCove(ctx context.Context, cove *coveclient.Client, tokenPath string) (string, error) {
-	for {
-		_, err := cove.LoadOrBootstrap(tokenPath)
-		if err == nil {
-			break
-		}
-
-		var urlErr *url.Error
-		switch {
-		case errors.Is(err, coveclient.ErrBootstrapClosed):
-			slog.Warn("waiting for a Cove token: run \"bootstrap open lighthouse\" in the Cove shell", "reason", err)
-		case errors.As(err, &urlErr):
-			slog.Warn("waiting for Cove to be reachable", "url", cove.BaseURL, "err", err)
-		default:
-			return "", err
-		}
-
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(15 * time.Second):
-		}
-	}
-
-	slog.Info("waiting for Cove to be ready", "url", cove.BaseURL)
-	if err := cove.WaitForReady(ctx); err != nil {
+// connectCove connects to Cove and returns Lighthouse's GitHub token.
+func connectCove(ctx context.Context, c *coveclient.Client, tokenPath string) (string, error) {
+	if err := cove.Connect(ctx, c, tokenPath, 15*time.Second); err != nil {
 		return "", err
 	}
-
-	if err := cove.AuthContext(ctx); err != nil {
-		if errors.Is(err, coveclient.ErrUnauthorized) {
-			return "", fmt.Errorf("Cove rejected Lighthouse's token (it was rotated or revoked). Delete %s, run \"bootstrap open lighthouse\" in the Cove shell, and restart Lighthouse", tokenPath)
-		}
-		return "", fmt.Errorf("checking Lighthouse's Cove token: %w", err)
-	}
-
-	token, err := cove.GetSecretContext(ctx, githubTokenKey)
-	switch {
-	case errors.Is(err, coveclient.ErrNotFound):
-		return "", fmt.Errorf("%s isn't in Cove. Create it in the Cove shell (\"create %s <token>\") and restart Lighthouse", githubTokenKey, githubTokenKey)
-	case err != nil:
-		return "", fmt.Errorf("reading %s from Cove: %w", githubTokenKey, err)
+	token, err := cove.GitHubToken(ctx, c)
+	if err != nil {
+		return "", err
 	}
 	slog.Info("GitHub token loaded from Cove", "length", len(token))
 	return token, nil

@@ -101,36 +101,52 @@ On the server. `lh` below stands for `docker exec -it lighthouse /lighthouse`; a
 ## 3. Architecture
 
 ```
-cmd/lighthouse/main.go    Modes: serve, shell, one command, version. Startup: config, Docker
-                          client, watchlist, control socket, Cove connection, the check loop
+cmd/lighthouse/main.go     Modes (serve, shell, one command, version) and the wiring of the
+                           packages below; nothing else
 internal/
-  config/                 Every setting, read from the environment once and validated
-  control/                The CLI ↔ daemon protocol: Service (what the CLI can ask), Handler
-                          and Serve (HTTP over a Unix socket), Client (the CLI's side)
-  daemon/                 The running Lighthouse: implements control.Service on the watcher and
-                          builder; turns errors into messages that say how to fix them
-  watcher/
-    watcher.go            Check loop, Scan, Deploy; one scan at a time
-    watchlist.go          The watchlist behind a lock: load, save, add, remove, rename, set URL,
-                          GitHub URL parsing
-    github.go             latestSHA: GET <api>/commits?per_page=1
-  builder/
-    builder.go            Build(): the deploy pipeline, one deploy at a time
-    engine.go             Download, unzip, find ${KEY} placeholders, fetch secrets, compose up
-    docker.go             Docker SDK (github.com/moby/moby/client): start, stop, restart,
-                          state, logs
-    workspace.go          Empties the staging and download folders
-  models/                 WatchedRepo and RepoStats (the repos.json shape) and their updates
-  cli/                    The command table, help and guides, shell (line editing, history,
-                          Tab completion), one-shot commands, output helpers
-Dockerfile                golang:1.27.1-alpine → alpine:3.24 + docker-cli + docker-cli-compose
-docker-compose.yml        Lighthouse's own service: server paths, docker.sock, spark network
-.github/workflows/ci.yml  gofmt, vet, tests with -race, govulncheck, binary and image builds
+  config/                  Every setting, read from the environment once and validated
+  cli/                     The command table, help and guides, the shell (line editing,
+                           history, Tab completion), one-shot commands, output helpers
+  control/                 The CLI ↔ daemon protocol: Service (what the CLI can ask), Serve
+                           (HTTP over a Unix socket) and Client (the CLI's side)
+  daemon/                  Implements control.Service on the parts below; turns their errors
+                           into messages that say how to fix them; startup phase
+  orchestrator/            When projects deploy: the check loop, Scan, Deploy; one scan at a
+                           time; records results in the watchlist
+  deploy/                  How a project deploys (one at a time): download and unpack
+                           (source.go), placeholders, secrets and compose up (compose.go),
+                           the scratch folders (workspace.go)
+  watchlist/               The projects and their state, stored in repos.json; Project and its
+                           Record… methods
+  github/                  Repository URLs, latest commit
+  docker/                  Container start, stop, restart, state, logs (Docker SDK)
+  cove/                    Connecting to Cove at startup: token, readiness, the GitHub token
+scripts/db/                Admin SQL for sparkdb, run by hand (§10.1)
+Dockerfile                 golang:1.27.1-alpine → alpine:3.24 + docker-cli + docker-cli-compose
+docker-compose.yml         Lighthouse's own service: server paths, docker.sock, spark network
+.github/workflows/ci.yml   gofmt, vet, tests with -race, govulncheck, binary and image builds
 ```
 
-**Dependencies point one way:** `main` → `daemon` / `cli` → `control`; `daemon` → `watcher` → `builder` → `models`. The CLI only knows `control.Service`. Only `config` reads the environment (the builder's `docker compose` subprocess inherits it).
+**Dependencies point one way:**
 
-**State and concurrency:** the daemon owns all state. The watchlist sits behind a mutex that is never held during network calls or deploys, and entries are always found by name. A scan runs at most once at a time (a second one is refused), and deploys run one at a time (a second one waits), whether they come from the check loop or the CLI.
+```
+main ─► cli ─► control
+main ─► daemon ─► orchestrator ─► watchlist ─► github
+                         │
+                         └─(Deployer)─► deploy ─► docker, CoveClient, watchlist
+        daemon ─► docker, watchlist, github
+main ─► cove ─► CoveClient
+```
+
+`cli` only knows `control.Service`; `orchestrator` only knows the `Deployer` and `Commits` interfaces; `daemon` only knows a `Containers` interface. Each is tested with a fake in place of the real thing. Only `config` reads the environment (the `docker compose` subprocess inherits it).
+
+**Where things go:**
+- A new CLI command → a `cli/cmd_*.go` function plus one entry in `commandTable()`; help and completion pick it up. If it asks the daemon for something new: a `control.Service` method, its route in `control/server.go`, a `Client` method, and the `daemon` implementation.
+- What happens when → `orchestrator`. How a deploy is done → `deploy`.
+- Anything stored about a project → `watchlist` today; the database store in step 2 replaces it behind the same operations.
+- A setting → a field in `config.Config`, read in `Load`, checked in `ValidateServe`.
+
+**State and concurrency:** the daemon owns all state. The watchlist's lock is never held during network calls or deploys, and entries are always found by name. A scan runs at most once at a time (a second is refused); deploys run one at a time (a second waits), whether they come from the check loop or the CLI.
 
 ---
 
@@ -164,7 +180,7 @@ GET https://api.github.com/repos/<owner>/<repo>/commits?per_page=1   (Authorizat
   └─ sha = the newest commit on the repository's default branch
 
 if sha differs from stats.updates.lastSeenCommitSha (or none is recorded):
-    Builder.Build(project)
+    Deployer.Deploy(project)
       ├─ fails → record the error; the commit is NOT recorded, so the next check deploys again
       └─ works → record the commit and clear the error
 record the check (time, count); save repos.json once per scan
@@ -172,7 +188,7 @@ record the check (time, count); save repos.json once per scan
 
 A scan that had failures logs one line naming the projects; `list` and `status` show each project's last error. A successful check clears it.
 
-### 4.3 The deploy pipeline (`Builder.Build`)
+### 4.3 The deploy pipeline (`deploy.Deployer.Deploy`)
 
 Deploys run one at a time; a second waits for the first.
 
@@ -386,7 +402,7 @@ Lighthouse's CLI follows the server's CLI conventions (clig.dev; modelled on Cov
 - **Output:** data (tables, logs, help) on stdout; messages on stderr, each starting with a symbol: `✓` success, `!` warning or wrong usage, `✗` error, `?` question. Color only on a terminal and never with `NO_COLOR`. Wrong arguments show `Usage: <form>`. Errors say how to fix them.
 - **Confirmation:** `remove`, `stop`, and the `all` forms of `deploy`, `stop` and `restart` ask `(y/N)`; Enter means no. `--yes` / `-y` skips the question. Without a terminal (a script, or `docker exec` without `-it`) they refuse and point at `--yes` instead of guessing.
 - **Scope:** container commands only act on watched projects' containers, never on anything else on the host (`stop sparkdb` is "no project named sparkdb").
-- **Adding a command:** a `cli/cmd_*.go` function plus one entry in `commandTable()`; help and completion pick it up. A new daemon action also needs a `control.Service` method, a route in `control/server.go`, a `Client` method and the `daemon` implementation.
+- **Adding a command:** see "Where things go" in [§3](#3-architecture).
 
 ---
 
@@ -586,7 +602,7 @@ Needs Go 1.27.1 and Docker. On Windows, run the commands in PowerShell or Git Ba
 
 ```bash
 cp .env.example .env        # point COVE_URL at a dev Cove; keep the token file outside the repository
-echo [] > config/repos.json
+mkdir .dev; echo [] > .dev/repos.json
 go run ./cmd/lighthouse serve     # one terminal: the daemon
 go run ./cmd/lighthouse shell     # another: the prompt (or: go run ./cmd/lighthouse status)
 ```
@@ -649,12 +665,12 @@ Every change that prod needs (a new host folder, a Cove key, Admin SQL, a compos
 
 ## 15. Known issues
 
-Found in a full review of the code on `release/1.0.0` (commit `9fef7fa`). Each issue has an ID used in the roadmap. **Severity:** Critical (causes outages or exposes secrets), High (breaks normal use), Medium (breaks an edge case or makes operations painful), Low (polish).
+Found in a full review of the code on `release/1.0.0` (commit `9fef7fa`). Open issues point at where the code is now; fixed ones keep the locations from the review. Each issue has an ID used in the roadmap. **Severity:** Critical (causes outages or exposes secrets), High (breaks normal use), Medium (breaks an edge case or makes operations painful), Low (polish).
 
 ### Bugs
 
 #### B1. A failed deploy takes the project down and retries forever
-**Critical.** `internal/builder/builder.go:49`, `internal/watcher/watcher.go:79-86`.
+**Critical.** `internal/deploy/deploy.go` (the stop before unpack), `internal/orchestrator/orchestrator.go` (`check`).
 `Build` stops the running container (step 3) **before** it unpacks, resolves secrets or builds. Any later failure, such as a typo in the Dockerfile, a missing Cove key, Cove being down, or a compose error, leaves the project stopped. Then, because the new SHA is only saved on success, the next scan 10 s later sees the same "new" commit and runs the whole deploy again. It downloads the archive again, stops the container again and fetches every secret again (filling Cove's audit log), indefinitely. The same ordering means a project whose compose file uses `${...}` can never be deployed while Cove is down, and Cove itself could not be deployed if it ever used a placeholder.
 **Fix:** resolve secrets and validate the compose file first; drop the explicit stop and let `docker compose up -d --build` replace the container only after a successful build; record every attempt, with backoff, and a "broken" state after N failures for the same SHA (from `todo.txt`).
 
@@ -689,7 +705,7 @@ Found in a full review of the code on `release/1.0.0` (commit `9fef7fa`). Each i
 **Fix:** wait for Cove (`WaitForReady`) with a timeout, verify the token (`Auth`), fail loudly (exit non-zero so Docker restarts it) or retry, and refresh the GitHub token on 401.
 
 #### B6. The placeholder parser is wrong for common Compose syntax
-**High.** `internal/builder/engine.go:129`.
+**High.** `internal/deploy/compose.go` (`placeholder`).
 The regex `\$\{([^}:]+)(?::[^}]*)?\}`:
 - treats `${VAR:-default}` and `${VAR:?err}` as required secrets (the cause of the Cove `v1.0.0-rc.1` failed deploy),
 - reads `${VAR-default}` as a key named `VAR-default`,
@@ -699,12 +715,12 @@ The regex `\$\{([^}:]+)(?::[^}]*)?\}`:
 **Fix:** ask Compose itself with `docker compose config --variables --format json` (Compose 2.24+). It lists every variable, braced or not, with its default and alternate values, and it already leaves out escaped `$${...}`. Fetch the variables that have no default; skip those with one unless the key exists in the project's scope. Checked on Compose 2.38: `${REQ}` → no default; `${OPT:-x}` → default `x`; `$${ESC}` → not listed; `$BARE` → listed.
 
 #### B7. Relative bind mounts point at the wrong place
-**Medium.** `internal/builder/engine.go:97,119`, `docker-compose.yml:31-38`.
+**Medium.** `internal/deploy/compose.go`, `docker-compose.yml` (the staging mount).
 Compose runs **inside** Lighthouse's container, so `./data` in a project's compose file resolves to `/app/server/staging/<repo>-main/data`. The host's Docker daemon then creates that path **on the host** (where it doesn't exist) as an empty directory. The staging copy is deleted after the deploy anyway.
 **Fix:** mount the staging folder at the **same path** inside and outside (`/srv/server/staging:/srv/server/staging`), unpack each deploy into a stable per-project folder, and document that persistent data uses absolute paths under `/srv/server/storage/<project>/`.
 
 #### B8. Downloads: no timeout, no status check, wrong branch, wrong folder name
-**Medium.** `internal/builder/engine.go:16-43, 97`, `internal/watcher/github.go:13`.
+**Medium.** `internal/deploy/source.go` (`download`), `internal/github/github.go` (`LatestCommit`), `internal/deploy/compose.go` (the folder name).
 - `http.Get` uses the default client with **no timeout**. A stalled download freezes all deploys for good.
 - The status code isn't checked: a 404 page is saved as `<repo>.zip` and fails later as "not a valid zip file".
 - The archive isn't pinned to the detected SHA. If `main` moves between check and download, Lighthouse deploys a commit it didn't record.
@@ -715,11 +731,11 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 **Fix:** download `GET /repos/{owner}/{repo}/zipball/{sha}` (or `tarball`) with the PAT and a timeout, check the status, and use the archive's single top-level folder, whatever it's called.
 
 #### B9. Unzipping drops file permissions
-**Medium.** `internal/builder/engine.go:79`. `os.Create` makes every file `0666 &^ umask`. Executable scripts committed to a repo lose `+x`, so `RUN ./script.sh` or an `ENTRYPOINT ["./start.sh"]` fails. (Also: a `defer rc.Close()` inside the loop piles up one open file per entry until the function returns.)
+**Medium.** `internal/deploy/source.go` (`extract`). `os.Create` makes every file `0666 &^ umask`. Executable scripts committed to a repo lose `+x`, so `RUN ./script.sh` or an `ENTRYPOINT ["./start.sh"]` fails. (The other half of the old finding, a `defer` inside the loop holding every file open, is fixed: each entry is closed as it's written.)
 **Fix:** `os.OpenFile(path, flags, file.Mode().Perm())`, close per iteration. Using the tarball, which keeps modes, is simpler still.
 
 #### B10. No timeouts and no graceful shutdown
-**Medium.** `internal/builder/engine.go:119,131`, `internal/watcher/watcher.go:58`, `cmd/lighthouse/main.go:74`.
+**Medium.** `internal/deploy/compose.go` (`exec.Command` without a context), `cmd/lighthouse/main.go` (the 8-second shutdown wait).
 `docker compose` runs with `exec.Command` (no context, no timeout). A hung build or pull freezes every deploy. On SIGTERM, `main` returns at once and kills a deploy mid-way. The loop uses `time.Sleep` and ignores the context.
 **Fix:** `exec.CommandContext` with a per-deploy timeout; on shutdown stop taking new work, wait for the current deploy (up to Docker's stop timeout, which should be raised with `stop_grace_period`).
 
@@ -782,7 +798,7 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 ### Security issues
 
 #### S1. Any watched repo can read any secret in Cove
-**Critical.** `internal/builder/engine.go:99-117`.
+**Critical.** `internal/deploy/compose.go` (`composeUp`).
 Lighthouse's token reads `*`, and Lighthouse fetches **whatever** `${KEY}` a project's compose file names. If a compose file in one project contains `- X=${SPARK_DATABASE_ADMIN_PASSWORD}` or `${BOTSUITE_COVE_TOKEN}`, that project's container gets the value. The cause could be a mistake, a compromised dependency that edits files, or anyone with push access. This bypasses all of Cove's per-project scoping: Lighthouse acts as a "confused deputy".
 A second, related risk: the token **file** (`/srv/server/storage/lighthouse/cove/token`) is a portable credential that reads everything. Every container on `spark` can reach `cove:2100`, so whoever gets a copy of that file (from a backup, a copy taken off the server, or a careless bind mount in another project) reads the whole vault **without** needing root.
 
@@ -1071,27 +1087,17 @@ sparkdb, Cove and cloudflared are added with `--infra`. What happened before: de
 - **Rollback limits:** going back to the previous image can't undo a data-format upgrade. Pin sparkdb's image to a major version (`postgres:17`), and treat a major upgrade as a manual, planned change.
 - **Dependency order:** sparkdb → Cove → everything else, after a reboot and for the queue.
 
-### 16.6 Proposed layout
+### 16.6 Layout
 
-Mirrors Cove, so both projects read the same way:
+The layout from the foundation ([§3](#3-architecture)) is the v1.0.0 layout; the steps add to it rather than move things:
 
-```
-cmd/lighthouse/main.go      modes: serve, shell, one command, migrate, import, self-update, version
-internal/
-  config/                   every setting, read from the environment once, validated
-  database/                 pgx pool, goose (embedded migrations/), schema version check, SQL
-  github/                   branch head / tags (ETag, rate limit, token expiry), archive download
-  semver/                   version parsing and comparison for release-only mode
-  compose/                  runs docker compose: config/variables/build/up/ps/logs, timeouts
-  checks/                   contract, policy, naming, gitleaks, test stage, Trivy
-  deploy/                   the pipeline (16.3), workspace, failure classification, scrubbing
-  orchestrator/             queue + worker, poller, reconcile loop (Docker events), locks, backoff
-  notify/                   Discord webhook
-  control/                  Unix-socket API for action commands
-  cli/                      command table, shell, output
-```
-
-Dependencies point one way: `main` → `cli` / `orchestrator` / `control` → `deploy` → `checks` / `github` / `compose` / `database` / CoveClient. Only `config` reads the environment.
+| Step | Adds or changes |
+|---|---|
+| 2. Database | `database/`: pgx pool, goose (embedded `migrations/`), schema check, the project store. It replaces `watchlist/`, with the same operations. `cove/` also reads the database URLs |
+| 3. Pipeline | `deploy/` rewritten (prepare, swap, verify, rollback); `compose/` for running `docker compose` (config, variables, build, up, ps) with timeouts; `github/` gains archive downloads by SHA |
+| 4. Checks | `checks/`: contract, policy, naming, gitleaks, test stage, Trivy |
+| 5. Orchestrator | `orchestrator/` gains the queue and worker, backoff, release-only mode (`semver/`), the infrastructure tier and the reconcile loop; `docker/` gains the event stream |
+| 7. Notifications, self-update | `notify/` (Discord); `lighthouse self-update` mode |
 
 ### 16.7 Database design
 

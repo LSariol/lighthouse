@@ -11,6 +11,8 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 - Settings: `COVE_ADDRESS` is now `COVE_URL`; new `APP_ENV`, `LIGHTHOUSE_VERSION`, `LIGHTHOUSE_POLL_INTERVAL`, `LIGHTHOUSE_CONTROL_SOCKET`. The `.env` file is optional (local development only).
 - Docker: no published port, no TTY, no `.env` mount; Go 1.27.1; `alpine:3.24`; the Docker client is `github.com/moby/moby/client`.
 - Logs are structured (`log/slog`) with timestamps.
+- Internal layout, one job per package: `orchestrator` (when to deploy), `deploy` (how), `watchlist` (the projects and their state), `github`, `docker`, `cove` (startup connection). Each is tested on its own.
+- Local development state lives in `.dev/` (gitignored) instead of `config/` and `Server/`.
 
 ### Fixed
 - One failing project no longer stops the others from being checked.
@@ -20,6 +22,9 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 - A project's last error is cleared after a successful check.
 - The staging and download folders can't be set to `/` or a system folder.
 - `govulncheck` is clean (the old `docker/docker` and OpenTelemetry advisories are gone).
+
+### Added
+- `scripts/db/check.sql` and `scripts/db/setup.sql`: the one-time Admin setup of Lighthouse's roles and database on sparkdb (DOCUMENTATION.md §10.1).
 
 ### Removed
 - Dead code, the commented-out orchestrator, old notes, and the unused `lighthouse.example.yaml` manifest sketch.

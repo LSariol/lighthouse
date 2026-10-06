@@ -4,9 +4,11 @@
 .env.*
 !.env.example
 cove-token
-config/repos.json
+.dev
+config
 Server
 RawGitResponse.json
+scripts
 
 .git
 .github

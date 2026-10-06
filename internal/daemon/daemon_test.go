@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +10,8 @@ import (
 
 	"github.com/LSariol/LightHouse/internal/config"
 	"github.com/LSariol/LightHouse/internal/control"
-	"github.com/LSariol/LightHouse/internal/watcher"
+	"github.com/LSariol/LightHouse/internal/orchestrator"
+	"github.com/LSariol/LightHouse/internal/watchlist"
 )
 
 // fakeContainers records container actions.
@@ -19,22 +19,22 @@ type fakeContainers struct {
 	actions []string
 }
 
-func (f *fakeContainers) StartContainer(ctx context.Context, name string) error {
+func (f *fakeContainers) Start(ctx context.Context, name string) error {
 	f.actions = append(f.actions, "start "+name)
 	return nil
 }
-func (f *fakeContainers) StopContainer(ctx context.Context, name string) error {
+func (f *fakeContainers) Stop(ctx context.Context, name string) error {
 	f.actions = append(f.actions, "stop "+name)
 	return nil
 }
-func (f *fakeContainers) RestartContainer(ctx context.Context, name string) error {
+func (f *fakeContainers) Restart(ctx context.Context, name string) error {
 	f.actions = append(f.actions, "restart "+name)
 	return nil
 }
-func (f *fakeContainers) ContainerState(ctx context.Context, name string) (string, error) {
+func (f *fakeContainers) State(ctx context.Context, name string) (string, error) {
 	return "running", nil
 }
-func (f *fakeContainers) ContainerLogs(ctx context.Context, name string, tail int) (string, error) {
+func (f *fakeContainers) Logs(ctx context.Context, name string, tail int) (string, error) {
 	return "", nil
 }
 
@@ -42,12 +42,12 @@ func newDaemon(t *testing.T) (*Daemon, *fakeContainers) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "repos.json")
 	os.WriteFile(path, []byte("[]"), 0o644)
-	w := watcher.New(http.DefaultClient, nil, path)
-	if err := w.Load(); err != nil {
+	list, err := watchlist.Load(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	c := &fakeContainers{}
-	return New(config.Config{Env: "dev"}, "test", w, c), c
+	return New(config.Config{Env: "dev"}, "test", list, orchestrator.New(list, nil, nil), c), c
 }
 
 func kind(err error) string {
