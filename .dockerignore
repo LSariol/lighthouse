@@ -1,0 +1,18 @@
+# Only the Go source is needed to build Lighthouse. In particular, never send
+# secrets or local state into the build.
+.env
+.env.*
+!.env.example
+cove-token
+config/repos.json
+Server
+RawGitResponse.json
+
+.git
+.github
+.vscode
+*.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+.gitignore

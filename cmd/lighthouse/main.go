@@ -13,7 +13,7 @@ import (
 	"github.com/LSariol/LightHouse/internal/cli"
 	"github.com/LSariol/LightHouse/internal/config"
 	"github.com/LSariol/LightHouse/internal/watcher"
-	dockerclient "github.com/docker/docker/client"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/lsariol/coveclient"
 )
 
@@ -41,7 +41,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	dockerClient, err := dockerclient.New(dockerclient.FromEnv)
 	if err != nil {
 		panic(err)
 	}

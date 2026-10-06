@@ -7,33 +7,37 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/stdcopy"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/client"
 )
 
 func (b *Builder) StartContainer(name string) error {
-	return b.Docker.ContainerStart(b.Ctx, name, container.StartOptions{})
+	_, err := b.Docker.ContainerStart(b.Ctx, name, client.ContainerStartOptions{})
+	return err
 }
 
 func (b *Builder) StopContainer(name string) error {
-	return b.Docker.ContainerStop(b.Ctx, name, container.StopOptions{})
+	_, err := b.Docker.ContainerStop(b.Ctx, name, client.ContainerStopOptions{})
+	return err
 }
 
 func (b *Builder) RestartContainer(name string) error {
-	return b.Docker.ContainerRestart(b.Ctx, name, container.StopOptions{})
+	_, err := b.Docker.ContainerRestart(b.Ctx, name, client.ContainerRestartOptions{})
+	return err
 }
 
 func (b *Builder) IsContainerRunning(nameOrId string) (bool, error) {
 
-	info, err := b.Docker.ContainerInspect(b.Ctx, nameOrId)
+	result, err := b.Docker.ContainerInspect(b.Ctx, nameOrId, client.ContainerInspectOptions{})
 	if err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("inspect %q: %w", nameOrId, err)
 	}
 
+	info := result.Container
 	if info.State == nil {
 		return false, fmt.Errorf("no state for %q", nameOrId)
 	}
@@ -42,7 +46,7 @@ func (b *Builder) IsContainerRunning(nameOrId string) (bool, error) {
 }
 
 func (b *Builder) GetContainerLogs(name string, tail int) (string, error) {
-	rc, err := b.Docker.ContainerLogs(b.Ctx, name, container.LogsOptions{
+	rc, err := b.Docker.ContainerLogs(b.Ctx, name, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Tail:       strconv.Itoa(tail),

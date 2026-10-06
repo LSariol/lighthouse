@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/LSariol/LightHouse/internal/models"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 	"github.com/lsariol/coveclient"
 )
 
