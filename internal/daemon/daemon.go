@@ -224,11 +224,34 @@ func (d *Daemon) Add(ctx context.Context, name string, url string) (control.Proj
 	if err != nil {
 		return control.Project{}, projectError(err, name, url)
 	}
+	chosen := name != ""
+	if !chosen {
+		name = projectName(repo.Name)
+	}
 	p, err := store.Add(ctx, name, repo)
-	if err != nil {
+	switch {
+	case errors.Is(err, projects.ErrNameTaken) && !chosen:
+		other, _ := store.Get(ctx, name)
+		return control.Project{}, control.Errorf(control.KindNameTaken,
+			"A project named %q already exists (watching %s). Add this one under another name: add %s --name <name>", name, other.Repo, url)
+	case errors.Is(err, projects.ErrNameTaken):
+		return control.Project{}, control.Errorf(control.KindNameTaken, "A project named %q already exists. Pick another name.", name)
+	case err != nil:
 		return control.Project{}, projectError(err, name, url)
 	}
 	return toProject(p), nil
+}
+
+// projectName is the name a repository's project gets by default: its name,
+// lowercased, with anything but letters, digits, - and _ turned into -.
+func projectName(repo string) string {
+	b := []byte(strings.ToLower(repo))
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			b[i] = '-'
+		}
+	}
+	return strings.Trim(string(b), "-_")
 }
 
 func (d *Daemon) Remove(ctx context.Context, name string, down bool) error {

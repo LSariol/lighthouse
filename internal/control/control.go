@@ -18,6 +18,9 @@ type Service interface {
 	Status(ctx context.Context) (Status, error)
 	Projects(ctx context.Context) ([]Project, error)
 
+	// Add starts watching the repository at url. With name "", the project
+	// is named after the repository (lowercased); a clash is a
+	// KindNameTaken error, and the caller can try again with a name.
 	Add(ctx context.Context, name string, url string) (Project, error)
 	// Remove stops watching a project; with down, its containers are
 	// stopped and removed too.
@@ -113,7 +116,8 @@ type Step struct {
 const (
 	KindInvalid     = "invalid"     // bad input: fix the arguments
 	KindNotFound    = "not_found"   // no such project
-	KindConflict    = "conflict"    // a name or URL already in use
+	KindConflict    = "conflict"    // a URL already watched, a scan already running
+	KindNameTaken   = "name_taken"  // `add`: a project already has that name; pick another
 	KindUnavailable = "unavailable" // the daemon isn't ready (still starting)
 	KindInternal    = "internal"    // anything else; details are in docker logs
 )

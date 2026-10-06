@@ -101,13 +101,18 @@ func commandTable(embedded bool) []command {
 		{
 			names:    []string{"add"},
 			group:    groupProjects,
-			synopsis: "<name> <url>",
+			synopsis: "<url> [--name <name>]",
 			summary:  "Start watching a GitHub repository",
 			usages: []usage{
-				{"add <name> <url>", "Watch a repository's main branch. Its first deploy happens on the next check. The repository must follow the project rules: \"help setup\"."},
+				{"add <url>", "Watch a repository's main branch, named after the repository. Its first deploy happens on the next check. The repository must follow the project rules: \"help setup\"."},
+				{"add <url> --name <name>", "Use another name, when the repository's name is taken. On a terminal, add asks for one instead."},
+			},
+			flags: []flag{
+				{"--name <name>", "The project's name. Letters, digits, - and _, up to 64."},
 			},
 			examples: []example{
-				{"add plop https://github.com/LSariol/plop", "deployed within one check"},
+				{"add https://github.com/LSariol/plop", "watched as plop"},
+				{"add https://github.com/x/plop --name plop-x", "a second plop"},
 			},
 			run: (*CLI).add,
 		},
@@ -374,8 +379,8 @@ const setupGuide = `Getting a repository ready for Lighthouse (e.g. "plop")
    waits until it's healthy, and puts the old version back if it isn't.
    Without one, a service only has to stay up for 10 seconds.
 
-4. Add it, under any name you like:
-     add plop https://github.com/LSariol/plop
+4. Add it. It's named after the repository (lowercase):
+     add https://github.com/LSariol/plop
    Lighthouse deploys the default branch's latest commit within a check.
    "status" shows each service; "logs plop:web" one service's output.
 

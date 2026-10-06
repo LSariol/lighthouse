@@ -27,13 +27,25 @@ func (c *CLI) deploy(ctx context.Context, args []string) error {
 	if err := c.deployOne(ctx, rest[0]); err != nil {
 		return err
 	}
-	success(fmt.Sprintf("Deployed %s.", rest[0]))
+	success(fmt.Sprintf("Deployed %q.", rest[0]))
 	return nil
 }
 
 func (c *CLI) deployOne(ctx context.Context, name string) error {
-	info(fmt.Sprintf("Deploying %s. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", name))
+	info(fmt.Sprintf("Deploying %q. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", name))
 	return c.svc.Deploy(ctx, name)
+}
+
+func (c *CLI) retry(ctx context.Context, args []string) error {
+	if len(args) != 2 {
+		return usageError{form: "retry <name>"}
+	}
+	info(fmt.Sprintf("Clearing %q's failures and deploying it. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", args[1]))
+	if err := c.svc.Retry(ctx, args[1]); err != nil {
+		return err
+	}
+	success(fmt.Sprintf("Deployed %q.", args[1]))
+	return nil
 }
 
 func (c *CLI) scan(ctx context.Context, args []string) error {
@@ -89,7 +101,7 @@ func (c *CLI) eachProject(ctx context.Context, verb string, done string, fn func
 			failed++
 			continue
 		}
-		success(fmt.Sprintf("%s %s.", done, p.Name))
+		success(fmt.Sprintf("%s %q.", done, p.Name))
 	}
 
 	if failed > 0 {
@@ -101,15 +113,16 @@ func (c *CLI) eachProject(ctx context.Context, verb string, done string, fn func
 const defaultHistory = 10
 
 func (c *CLI) history(ctx context.Context, args []string) error {
+	const form = "history <name> [count]"
 	if len(args) < 2 || len(args) > 3 {
-		return usageError{form: "history <name> [count]"}
+		return usageError{form: form}
 	}
 
 	count := defaultHistory
 	if len(args) == 3 {
 		n, err := strconv.Atoi(args[2])
 		if err != nil || n < 1 {
-			return usageError{reason: fmt.Sprintf("%q isn't a positive number.", args[2]), form: "history <name> [count]"}
+			return usageError{reason: fmt.Sprintf("%q isn't a positive number.", args[2]), form: form}
 		}
 		count = n
 	}
@@ -119,7 +132,7 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(deploys) == 0 {
-		info(fmt.Sprintf("%s hasn't been deployed by this Lighthouse yet.", args[1]))
+		info(fmt.Sprintf("%q hasn't been deployed by this Lighthouse yet.", args[1]))
 		return nil
 	}
 
@@ -127,27 +140,53 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 	for i, d := range deploys {
 		started := d.StartedAt
 		rows = append(rows, []string{
-			strconv.Itoa(i + 1), ago(&started), d.Trigger, result(d), shortSHA(d.Commit),
-			d.FinishedAt.Sub(d.StartedAt).Round(time.Second).String(), firstLine(d.Error, 50),
+			strconv.Itoa(i + 1), formatTime(&started), d.Trigger, result(d), shortSHA(d.Commit),
+			took(d.StartedAt, d.FinishedAt), firstLine(d.Error, 50),
 		})
 	}
 	table(rows)
-	info(fmt.Sprintf("\"report %s <#>\" shows one in detail.", args[1]))
+	info(fmt.Sprintf("%d %s. \"report %s <#>\" shows one step by step.", len(deploys), plural(len(deploys), "deploy", "deploys"), args[1]))
 	return nil
 }
 
-// firstLine is the first line of s, cut to max characters, or "-".
-func firstLine(s string, max int) string {
-	if s == "" {
-		return "-"
+func (c *CLI) report(ctx context.Context, args []string) error {
+	const form = "report <name> [n]"
+	if len(args) < 2 || len(args) > 3 {
+		return usageError{form: form}
 	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
+	n := 1
+	if len(args) == 3 {
+		v, err := strconv.Atoi(args[2])
+		if err != nil || v < 1 {
+			return usageError{reason: fmt.Sprintf("%q isn't a deploy number (1 is the latest).", args[2]), form: form}
+		}
+		n = v
 	}
-	if r := []rune(s); len(r) > max {
-		s = string(r[:max-1]) + "…"
+
+	d, err := c.svc.Report(ctx, args[1], n)
+	if err != nil {
+		return err
 	}
-	return s
+
+	started := d.StartedAt
+	fields([][2]string{
+		{"Commit", orDash(d.Commit)},
+		{"Started", formatTime(&started) + " (" + d.Trigger + ")"},
+		{"Took", took(d.StartedAt, d.FinishedAt)},
+		{"Result", result(d) + kindNote(d.FailureKind)},
+	})
+	if d.Error != "" {
+		out("")
+		out(d.Error)
+	}
+	for _, st := range d.Steps {
+		out("")
+		out(fmt.Sprintf("== %s: %s (%s)", st.Name, st.Status, took(st.StartedAt, st.FinishedAt)))
+		if log := strings.TrimRight(st.Log, "\n"); log != "" {
+			out(log)
+		}
+	}
+	return nil
 }
 
 // result describes how a deploy went: "succeeded", "failed at build",
@@ -166,57 +205,6 @@ func result(d control.Deployment) string {
 	}
 }
 
-func (c *CLI) retry(ctx context.Context, args []string) error {
-	if len(args) != 2 {
-		return usageError{form: "retry <name>"}
-	}
-	info(fmt.Sprintf("Clearing %s's failures and deploying it. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", args[1]))
-	if err := c.svc.Retry(ctx, args[1]); err != nil {
-		return err
-	}
-	success(fmt.Sprintf("Deployed %s.", args[1]))
-	return nil
-}
-
-func (c *CLI) report(ctx context.Context, args []string) error {
-	if len(args) < 2 || len(args) > 3 {
-		return usageError{form: "report <name> [n]"}
-	}
-	n := 1
-	if len(args) == 3 {
-		v, err := strconv.Atoi(args[2])
-		if err != nil || v < 1 {
-			return usageError{reason: fmt.Sprintf("%q isn't a deploy number (1 is the latest).", args[2]), form: "report <name> [n]"}
-		}
-		n = v
-	}
-
-	d, err := c.svc.Report(ctx, args[1], n)
-	if err != nil {
-		return err
-	}
-
-	started := d.StartedAt
-	table([][]string{
-		{"Commit", orDash(d.Commit)},
-		{"Started", started.Local().Format("2006-01-02 15:04:05") + " (" + ago(&started) + "), by " + d.Trigger},
-		{"Result", result(d) + kindNote(d.FailureKind)},
-		{"Took", d.FinishedAt.Sub(d.StartedAt).Round(time.Second).String()},
-	})
-	if d.Error != "" {
-		out("")
-		out(d.Error)
-	}
-	for _, st := range d.Steps {
-		out("")
-		out(fmt.Sprintf("== %s: %s (%s)", st.Name, st.Status, st.FinishedAt.Sub(st.StartedAt).Round(time.Millisecond)))
-		if log := strings.TrimRight(st.Log, "\n"); log != "" {
-			out(log)
-		}
-	}
-	return nil
-}
-
 func kindNote(kind string) string {
 	switch kind {
 	case "transient":
@@ -225,4 +213,28 @@ func kindNote(kind string) string {
 		return " (a problem with the commit: counts toward broken)"
 	}
 	return ""
+}
+
+// took is how long something took, to the second (or the millisecond, under
+// a second).
+func took(start time.Time, end time.Time) string {
+	d := end.Sub(start)
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
+}
+
+// firstLine is the first line of s, cut to max characters, or "-".
+func firstLine(s string, max int) string {
+	if s == "" {
+		return "-"
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max-1]) + "…"
+	}
+	return s
 }

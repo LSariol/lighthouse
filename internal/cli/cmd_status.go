@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -22,7 +23,6 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 
 	var problems []string
 
-	phase := s.Phase
 	if s.Phase != "running" {
 		problems = append(problems, "Lighthouse is "+s.Phase)
 	}
@@ -40,35 +40,36 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 		}
 	}
 
-	database := orDash(s.Database)
 	switch {
 	case s.Database == "unreachable":
 		problems = append(problems, "the database is unreachable")
 	case strings.Contains(s.Schema, "needs"):
-		problems = append(problems, "database migrations are missing")
-	}
-	if s.Schema != "" {
-		database += ", schema " + s.Schema
+		problems = append(problems, "migrations are missing")
 	}
 
 	up := time.Since(s.StartedAt).Round(time.Second)
-	table([][]string{
+	rows := [][2]string{
 		{"Version", orDash(s.Version)},
 		{"Environment", orDash(s.Env)},
-		{"State", phase + ", up " + up.String()},
+		{"State", s.Phase + ", up " + up.String()},
 		{"Automatic deploys", deploys},
 		{"Cove", orDash(s.CoveURL)},
 		{"GitHub token", token},
-		{"Database", database},
-	})
+		{"Database", orDash(s.Database)},
+	}
+	if s.Schema != "" {
+		rows = append(rows, [2]string{"Schema", s.Schema})
+	}
+	fields(rows)
 
-	if s.Phase != "running" {
+	switch {
+	case s.Phase != "running":
 		out("")
 		info("Projects are shown once Lighthouse is running.")
-	} else if len(s.Projects) == 0 {
+	case len(s.Projects) == 0:
 		out("")
-		info("No projects are watched yet. Add one with \"add <name> <url>\".")
-	} else {
+		info("No projects are watched yet. Add one with \"add <url>\".")
+	default:
 		out("")
 		rows := [][]string{{"PROJECT", "SERVICE", "STATE", "COMMIT", "DEPLOYED", "LAST CHECK"}}
 		for _, p := range s.Projects {
@@ -76,17 +77,17 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 			switch {
 			case p.Broken:
 				check = "broken"
-				problems = append(problems, fmt.Sprintf("%s is broken (\"report %s\", then \"retry %s\"): %s", p.Name, p.Name, p.Name, firstLine(p.LastError, 200)))
+				problems = append(problems, fmt.Sprintf("%q is broken (\"report %s\", then \"retry %s\"): %s", p.Name, p.Name, p.Name, strings.TrimSuffix(firstLine(p.LastError, 200), ".")))
 			case p.LastError != "":
-				check = "failed " + ago(p.LastErrorAt)
-				problems = append(problems, fmt.Sprintf("%s: %s", p.Name, firstLine(p.LastError, 200)))
+				check = "failed " + formatTime(p.LastErrorAt)
+				problems = append(problems, fmt.Sprintf("%q: %s", p.Name, strings.TrimSuffix(firstLine(p.LastError, 200), ".")))
 			case p.LastChecked == nil:
 				check = "-"
 			}
 			if p.State != "running" {
-				problems = append(problems, fmt.Sprintf("%s is %s", p.Name, p.State))
+				problems = append(problems, fmt.Sprintf("%q is %s", p.Name, p.State))
 			}
-			rows = append(rows, []string{p.Name, "", p.State, shortSHA(p.Commit), ago(p.LastDeployed), check})
+			rows = append(rows, []string{p.Name, "", p.State, shortSHA(p.Commit), formatTime(p.LastDeployed), check})
 			for _, svc := range p.Services {
 				state := svc.State
 				if svc.Health != "" {
@@ -99,13 +100,7 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 	}
 
 	if len(problems) > 0 {
-		noun := "things need"
-		if len(problems) == 1 {
-			noun = "thing needs"
-		}
-		return fmt.Errorf("%d %s attention:\n  %s", len(problems), noun, strings.Join(problems, "\n  "))
+		return errors.New("Needs attention: " + strings.Join(problems, "; ") + ".")
 	}
-	out("")
-	success("Everything is healthy.")
 	return nil
 }

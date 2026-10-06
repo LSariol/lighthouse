@@ -78,12 +78,7 @@ func New(svc control.Service, opts Options) *CLI {
 func (c *CLI) Run(ctx context.Context, stop func()) {
 	c.leave = stop
 
-	if c.embedded {
-		if c.interactive {
-			info("Lighthouse is running, with its CLI here. Type \"help\" for commands; \"exit\" or Ctrl+C stops Lighthouse.")
-		}
-	} else {
-		info("Lighthouse shell. Type \"help\" for commands, \"exit\" to leave.")
+	if !c.embedded {
 		c.checkDaemon(ctx)
 		if c.interactive && c.runTerminal(ctx) {
 			return
@@ -144,56 +139,93 @@ func report(err error) {
 	fail(err.Error())
 }
 
-// confirm asks a yes/no question; Enter means no. answered is false when
-// there's no terminal to ask on (e.g. a one-shot command run by a script):
-// the caller then refuses and points at --yes rather than guessing.
-func (c *CLI) confirm(question string) (yes bool, answered bool) {
-	question += " (y/N)"
-	var answer string
-
+// askLine asks question and returns the answer, trimmed. answered is false
+// when there's no terminal to ask on (e.g. a one-shot command run by a
+// script): the caller then refuses rather than guessing.
+func (c *CLI) askLine(question string) (answer string, answered bool) {
 	switch {
 	case c.term != nil:
 		c.term.SetPrompt(colorize(yellow, "? "+question) + " ")
 		line, err := c.term.ReadLine()
 		c.term.SetPrompt(c.prompt)
 		if err != nil {
-			return false, false
+			return "", false
 		}
 		answer = line
 	case c.interactive:
 		ask(question)
 		if !c.scanner.Scan() {
 			fmt.Fprintln(stderr)
-			return false, false
+			return "", false
 		}
 		answer = c.scanner.Text()
 	default:
-		return false, false
+		return "", false
 	}
+	return strings.TrimSpace(answer), true
+}
 
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	return answer == "y" || answer == "yes", true
+// confirm asks a yes/no question; Enter means no.
+func (c *CLI) confirm(question string) (yes bool, answered bool) {
+	answer, answered := c.askLine(question + " (y/N)")
+	answer = strings.ToLower(answer)
+	return answer == "y" || answer == "yes", answered
 }
 
 // confirmOrRefuse asks question unless skip (--yes) is set. It returns
-// whether to go ahead; when not, it has already explained why.
-func (c *CLI) confirmOrRefuse(question string, skip bool, what string) (bool, error) {
+// whether to go ahead; when not, it has already explained why. verb names
+// the action in the messages: "remove", "stop all".
+func (c *CLI) confirmOrRefuse(question string, skip bool, verb string) (bool, error) {
 	if skip {
 		return true, nil
 	}
 	yes, answered := c.confirm(question)
 	if !answered {
-		return false, fmt.Errorf("%s needs confirmation, and there's no terminal to ask on. Add --yes to go ahead.", what)
+		return false, fmt.Errorf("%s cancelled: no answer to the confirmation. Use --yes to %s without asking.", capitalize(verb), verb)
 	}
 	if !yes {
-		info("Cancelled.")
+		info(capitalize(verb) + " cancelled.")
 	}
 	return yes, nil
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // takeYesFlag removes --yes / -y from args and reports whether it was there.
 func takeYesFlag(args []string) (bool, []string) {
 	return takeFlag(args, "--yes", "-y")
+}
+
+// takeValue removes a flag and its value ("--name x" or "--name=x") from args.
+// The value is "" when the flag isn't there; a flag without a value is an
+// error.
+func takeValue(args []string, flag string) (string, []string, error) {
+	value := ""
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == flag:
+			if i+1 >= len(args) || args[i+1] == "" {
+				return "", nil, fmt.Errorf("%s needs a value", flag)
+			}
+			value = args[i+1]
+			i++
+		case strings.HasPrefix(a, flag+"="):
+			value = strings.TrimPrefix(a, flag+"=")
+			if value == "" {
+				return "", nil, fmt.Errorf("%s needs a value", flag)
+			}
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return value, rest, nil
 }
 
 // takeFlag removes every spelling of a flag from args and reports whether it

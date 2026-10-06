@@ -105,7 +105,7 @@ On its first start Lighthouse picks up its Cove access automatically. After that
 |---|---|
 | `status` | Is everything healthy? |
 | `list` | Show the projects being watched |
-| `add <name> <github-url>` | Start watching a project |
+| `add <github-url>` | Start watching a project (named after the repository) |
 | `remove <name>` | Stop watching a project |
 | `deploy <name>` | Deploy now, even with no new commit |
 | `logs <name>` | Show a project's recent output |

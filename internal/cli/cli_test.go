@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -43,7 +44,17 @@ func (f *fakeService) Status(ctx context.Context) (control.Status, error) { retu
 func (f *fakeService) Projects(ctx context.Context) ([]control.Project, error) {
 	return f.projects, nil
 }
+
+// Add names a project after the repository when name is "", and refuses a
+// name that's taken, as the daemon does.
 func (f *fakeService) Add(ctx context.Context, name, url string) (control.Project, error) {
+	if name == "" {
+		name = url[strings.LastIndex(url, "/")+1:]
+	}
+	if slices.ContainsFunc(f.projects, func(p control.Project) bool { return p.Name == name }) {
+		f.calls = append(f.calls, "add "+name+" (taken)")
+		return control.Project{}, control.Errorf(control.KindNameTaken, "A project named %q already exists.", name)
+	}
 	return control.Project{Name: name, URL: url, ComposeProject: name}, f.act("add", name)
 }
 func (f *fakeService) Remove(ctx context.Context, name string, down bool) error {
@@ -164,10 +175,10 @@ func TestUnknownAndWrongUsage(t *testing.T) {
 	if _, _, err := run(t, newFake(), "frobnicate"); err == nil || !strings.Contains(err.Error(), "help") {
 		t.Errorf("unknown command: %v", err)
 	}
-	_, _, err := run(t, newFake(), "add onlyname")
+	_, _, err := run(t, newFake(), "add")
 	var usage usageError
 	if !errors.As(err, &usage) || !strings.HasPrefix(err.Error(), "Usage: add") {
-		t.Errorf("add with one argument = %v, want \"Usage: add ...\"", err)
+		t.Errorf("add without a URL = %v, want \"Usage: add ...\"", err)
 	}
 	if _, _, err := run(t, newFake(), "logs plop many"); !errors.As(err, &usage) {
 		t.Errorf("logs with a bad count = %v, want a usage error", err)
@@ -203,6 +214,75 @@ func TestConfirmation(t *testing.T) {
 	}
 }
 
+func TestConfirmationWording(t *testing.T) {
+	_, _, err := run(t, newFake("plop"), "remove plop")
+	if err == nil || err.Error() != "Remove cancelled: no answer to the confirmation. Use --yes to remove without asking." {
+		t.Errorf("remove without a terminal = %v", err)
+	}
+
+	errOut, err := runAnswering(t, newFake("plop"), "remove plop", "\n")
+	if err != nil || !strings.Contains(errOut, "Remove cancelled.") {
+		t.Errorf("remove answered with Enter: %v, messages:\n%s", err, errOut)
+	}
+}
+
+func TestAddNames(t *testing.T) {
+	// Named after the repository by default; --name only when asked.
+	svc := newFake()
+	if _, _, err := run(t, svc, "add https://github.com/o/plop"); err != nil || svc.calls[0] != "add plop" {
+		t.Errorf("add <url>: %v, calls %v", err, svc.calls)
+	}
+	svc = newFake()
+	if _, _, err := run(t, svc, "add https://github.com/o/plop --name other"); err != nil || svc.calls[0] != "add other" {
+		t.Errorf("add --name: %v, calls %v", err, svc.calls)
+	}
+	var usage usageError
+	if _, _, err := run(t, newFake(), "add https://github.com/o/plop --name"); !errors.As(err, &usage) {
+		t.Errorf("add --name without a value = %v, want a usage error", err)
+	}
+
+	// A taken name, without a terminal: the error, nothing added.
+	svc = newFake("plop")
+	_, _, err := run(t, svc, "add https://github.com/x/plop")
+	var ce *control.Error
+	if !errors.As(err, &ce) || ce.Kind != control.KindNameTaken || len(svc.calls) != 1 {
+		t.Errorf("add with a taken name = %v, calls %v", err, svc.calls)
+	}
+
+	// On a terminal: asked for another name, and asked again while it's taken.
+	svc = newFake("plop", "plop2")
+	errOut, err := runAnswering(t, svc, "add https://github.com/x/plop", "plop2\nplop3\n")
+	if err != nil || strings.Join(svc.calls, ",") != "add plop (taken),add plop2 (taken),add plop3" {
+		t.Errorf("add with a taken name on a terminal: %v, calls %v", err, svc.calls)
+	}
+	if !strings.Contains(errOut, `✓ Watching "plop3"`) {
+		t.Errorf("messages:\n%s", errOut)
+	}
+
+	// Enter cancels.
+	svc = newFake("plop")
+	errOut, err = runAnswering(t, svc, "add https://github.com/x/plop", "\n")
+	if err != nil || len(svc.calls) != 1 || !strings.Contains(errOut, "Add cancelled.") {
+		t.Errorf("add cancelled: %v, calls %v, messages:\n%s", err, svc.calls, errOut)
+	}
+}
+
+// runAnswering runs line as if on a terminal, answering its questions with
+// input. It returns the messages (stderr).
+func runAnswering(t *testing.T, svc control.Service, line string, input string) (string, error) {
+	t.Helper()
+	var o, e bytes.Buffer
+	oldOut, oldErr, oldColor := stdout, stderr, useColor
+	stdout, stderr, useColor = &o, &e, false
+	defer func() { stdout, stderr, useColor = oldOut, oldErr, oldColor }()
+
+	c := New(svc, Options{})
+	c.interactive = true
+	c.scanner = bufio.NewScanner(strings.NewReader(input))
+	err := c.Exec(context.Background(), strings.Fields(line))
+	return e.String(), err
+}
+
 func TestAllReportsEachProject(t *testing.T) {
 	svc := newFake("a", "b", "c")
 	svc.failFor["b"] = true
@@ -211,7 +291,7 @@ func TestAllReportsEachProject(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "1 of 3") {
 		t.Errorf("start all = %v, want \"1 of 3 projects failed\"", err)
 	}
-	if !strings.Contains(errOut, "✓ Started a.") || !strings.Contains(errOut, "✗ b failed") || !strings.Contains(errOut, "✓ Started c.") {
+	if !strings.Contains(errOut, "✓ Started \"a\".") || !strings.Contains(errOut, "✗ b failed") || !strings.Contains(errOut, "✓ Started \"c\".") {
 		t.Errorf("messages:\n%s", errOut)
 	}
 }
@@ -219,7 +299,7 @@ func TestAllReportsEachProject(t *testing.T) {
 func TestOutputStreams(t *testing.T) {
 	// Data on stdout, messages on stderr.
 	out, errOut, err := run(t, newFake("plop"), "list")
-	if err != nil || !strings.Contains(out, "plop") || errOut != "" {
+	if err != nil || !strings.Contains(out, "plop") || errOut != "1 project\n" {
 		t.Errorf("list: out %q, err %q, %v", out, errOut, err)
 	}
 
@@ -240,14 +320,14 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("healthy status = %v", err)
 	}
-	if !strings.Contains(out, "plop") || !strings.Contains(errOut, "healthy") {
+	if !strings.Contains(out, "plop") || errOut != "" {
 		t.Errorf("out %q, err %q", out, errOut)
 	}
 
 	svc.status.Projects[0].State = "degraded"
 	svc.status.Projects[0].LastError = "GitHub: 404 Not Found"
 	_, _, err = run(t, svc, "status")
-	if err == nil || !strings.Contains(err.Error(), "2 things need attention") {
+	if err == nil || !strings.HasPrefix(err.Error(), "Needs attention: ") || strings.Count(err.Error(), ";") != 1 {
 		t.Errorf("unhealthy status = %v, want two problems", err)
 	}
 }
@@ -322,7 +402,7 @@ func TestHistory(t *testing.T) {
 func TestStatusDatabase(t *testing.T) {
 	svc := newFake("plop")
 	out, _, _ := run(t, svc, "status")
-	if !strings.Contains(out, "reachable, schema version 2 (up to date)") {
+	if !strings.Contains(out, "Database:           reachable") || !strings.Contains(out, "Schema:             version 2 (up to date)") {
 		t.Errorf("status doesn't show the database:\n%s", out)
 	}
 
@@ -404,7 +484,7 @@ func TestStatusShowsServicesAndBroken(t *testing.T) {
 	svc.status.Projects[0].Broken = true
 	svc.status.Projects[0].LastError = "broken after 3 failed deploys"
 	_, _, err = run(t, svc, "status")
-	if err == nil || !strings.Contains(err.Error(), "plop is broken") || !strings.Contains(err.Error(), "retry plop") {
+	if err == nil || !strings.Contains(err.Error(), "\"plop\" is broken") || !strings.Contains(err.Error(), "retry plop") {
 		t.Errorf("status of a broken project = %v", err)
 	}
 }

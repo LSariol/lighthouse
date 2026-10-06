@@ -216,7 +216,7 @@ func TestErrorsExplainTheFix(t *testing.T) {
 		{d.Remove(ctx, "nope", false), control.KindNotFound, `"list"`},
 		{d.Rename(ctx, "personalWebsite", "bad name"), control.KindInvalid, "letters, digits"},
 		{d.SetURL(ctx, "personalWebsite", "https://gitlab.com/a/b"), control.KindInvalid, "https://github.com/<owner>/<repo>"},
-		{func() error { _, err := d.Add(ctx, "personalWebsite", "https://github.com/a/b"); return err }(), control.KindConflict, "already exists"},
+		{func() error { _, err := d.Add(ctx, "personalWebsite", "https://github.com/a/b"); return err }(), control.KindNameTaken, "already exists"},
 		{func() error { _, err := d.Add(ctx, "x", "https://github.com/lsariol/landing"); return err }(), control.KindConflict, "already watched"},
 		{func() error { _, err := d.Logs(ctx, "personalWebsite", 0); return err }(), control.KindInvalid, "between 1 and"},
 		{func() error { _, err := d.History(ctx, "personalWebsite", 1000); return err }(), control.KindInvalid, "between 1 and"},

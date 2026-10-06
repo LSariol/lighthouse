@@ -90,7 +90,8 @@ func promptFor(env string) string {
 	return "lighthouse " + label + "> "
 }
 
-// table writes rows as aligned columns to stdout. The first row is the header.
+// table writes rows as aligned columns to stdout. The first row is the header,
+// in capitals (as Cove's tables).
 func table(rows [][]string) {
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	for _, row := range rows {
@@ -99,23 +100,21 @@ func table(rows [][]string) {
 	tw.Flush()
 }
 
-// ago describes a moment relative to now: "just now", "5m ago", "3h ago",
-// "2d ago", or "-" when there is none.
-func ago(t *time.Time) string {
+// fields writes "Name:  value" lines with the values aligned, to stdout.
+func fields(rows [][2]string) {
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	for _, r := range rows {
+		fmt.Fprintf(tw, "%s:\t%s\n", r[0], r[1])
+	}
+	tw.Flush()
+}
+
+// formatTime is a moment in local time, "2006-01-02 15:04", or "-".
+func formatTime(t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "-"
 	}
-	d := time.Since(*t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	}
+	return t.Local().Format("2006-01-02 15:04")
 }
 
 // shortSHA is a commit's first 7 characters, or "-".
@@ -135,4 +134,23 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+func plural(n int, one string, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// joinNames is "a", "a and b", or "a, b and c".
+func joinNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	}
 }

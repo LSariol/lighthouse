@@ -118,6 +118,7 @@ var statusFor = map[string]int{
 	KindInvalid:     http.StatusBadRequest,
 	KindNotFound:    http.StatusNotFound,
 	KindConflict:    http.StatusConflict,
+	KindNameTaken:   http.StatusConflict,
 	KindUnavailable: http.StatusServiceUnavailable,
 	KindInternal:    http.StatusInternalServerError,
 }

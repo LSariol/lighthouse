@@ -85,7 +85,7 @@ On the server. `lh` below stands for `docker exec -it lighthouse /lighthouse`; a
 |---|---|
 | Open the prompt | `lh shell` (`exit` or Ctrl-D leaves; Lighthouse keeps running) |
 | Is everything healthy? | `lh status` (exits non-zero if something needs attention) |
-| Watch a new repo | `lh add <name> https://github.com/<owner>/<repo>` |
+| Watch a new repo | `lh add https://github.com/<owner>/<repo>` (named after the repo; `--name <name>` if that's taken) |
 | Stop watching | `lh remove <name>` (also removes its containers), or `lh remove <name> --keep` (leaves them running) |
 | See what's watched | `lh list` |
 | Deploy now | `lh deploy <name>` (or `deploy all`) |
@@ -433,7 +433,7 @@ Lighthouse's CLI follows the server's CLI conventions (clig.dev; modelled on Cov
 | Command | Usage | Notes |
 |---|---|---|
 | `list`, `ls`, `l` | `list` | Every project: repository, deployed commit, last deploy, last check; its last error, and whether it's broken |
-| `add` | `add <name> <url>` | Names: letters, digits, `-`, `_`, up to 64. The URL may have `www.`, a trailing `/` or `.git`. Deployed on the next check |
+| `add` | `add <url> [--name <name>]` | Named after the repository (lowercase). `--name` only when that name is taken; on a terminal `add` asks instead. Names: letters, digits, `-`, `_`, up to 64. The URL may have `www.`, a trailing `/` or `.git`. Deployed on the next check |
 | `remove`, `rm` | `remove <name> [--keep] [--yes]` | Asks first. Stops watching it and removes its containers and networks (`docker compose down`); its data and images stay. `--keep` leaves the containers running, untracked |
 | `rename` | `rename <name> <new-name>` | Lighthouse's name only; repository and containers unchanged |
 | `set-url` | `set-url <name> <url>` | Watch another repository under the same name |
@@ -609,7 +609,7 @@ A new password is generated straight into its URL on the server, and `setup.sql`
 1. Make the repo meet the contract ([§7](#7-connecting-a-project-the-contract), or `lh help setup`).
 2. Create its secrets in Cove under standard names. If the project has a database: roles and `CREATE DATABASE` by hand as Admin, schema via the project's own goose migrations ([§14.1](#141-databases-and-migrations)).
 3. Create its host folders under `/srv/server/storage/<project>/`.
-4. `lh add <name> https://github.com/LSariol/<Repo>`, then `lh scan` (or wait for the next check). Watch `docker logs -f lighthouse`.
+4. `lh add https://github.com/LSariol/<Repo>`, then `lh scan` (or wait for the next check). Watch `docker logs -f lighthouse`.
 5. Check: `lh status` shows its services running; `history <one of its keys>` in Cove shows `lighthouse`.
 
 ### Removing a project
@@ -1085,7 +1085,7 @@ Modelled on Cove:
 Read commands (`list`, `status`, `history`) read the database directly. Action commands (`deploy`, `retry`, `approve`, `rollback`, `pause`, `stop`) go to the daemon through a Unix socket inside the container, so the one worker stays the only thing that touches projects.
 
 Commands work on **project names only** (B13): no raw container names, nothing outside the managed projects. New commands:
-- `add <name> <url> [--release-only] [--prereleases] [--branch <b>] [--infra]`
+- `add <url> [--name <name>] [--release-only] [--prereleases] [--branch <b>] [--infra]`
 - `deploy <name> [version]` and `approve <name>`
 - `retry <name>` and `rollback <name> [version]`
 - `history <name>`
@@ -1159,11 +1159,9 @@ Steps 3–6 of the pipeline. Because every project follows the same contract (Co
                docker.sock, mounts outside /srv/server/storage/<project>/ — unless excepted
   4. Secrets?  compose config --variables (B6): needed keys follow the naming standard, and
                exist in Cove (GET /v0/secrets: names only, no reads counted)
-               + gitleaks over the source (no committed secrets)
   5. Test      if the Dockerfile has a `test` stage: docker build --target test --network none
                (no secrets, no network, timeout). Go: vet/test/govulncheck; Node: lint/test; …
   6. Build     docker compose -p <project> build --pull, image tagged <project>:<version>
-               then Trivy on the image: warn or block per project (default: block on CRITICAL)
   7. Fetch     one GetSecrets(keys…) batch; values held in memory only
   8. Backup    infrastructure projects only (16.5)
   9. Approve   infrastructure projects only: wait for `approve <name>` (notified)
@@ -1198,7 +1196,7 @@ After 3 counted failures for the same version, the project is **broken**: no mor
 
 ### 16.4 Release-only mode
 
-`add plop https://github.com/LSariol/plop --release-only`
+`add https://github.com/LSariol/plop --release-only`
 
 - **What counts as a release:** tags that are plain semantic versions, `v1.2.3` or `1.2.3`, compared as versions (so `v1.10.0` > `v1.9.0`). Pre-releases (`v1.1.0-rc.1`) are ignored unless the project has `--prereleases`. Anything else (`latest`, `deploy-test`) is ignored.
 - **On adding:** the newest release is deployed (or `--from v1.2.0` to pick one).
@@ -1228,7 +1226,7 @@ The layout from the foundation ([§3](#3-architecture)) is the v1.0.0 layout; th
 |---|---|
 | 2. Database — **done** | `projects/` (types, the Store interface, an in-memory Store and its shared tests), `database/` (pgx pool, goose, schema check, the Postgres Store), `reposjson/` (for `import`); `watchlist/` removed; `cove/` reads the database URLs |
 | 3. Pipeline — **done** | `deploy/` rewritten (steps, rollback, verify, cleanup, scrubbing); `compose/` (config, variables, build, up, down, with deadlines and a clean environment); `docker/` finds containers by label and manages tags; `github/` downloads commits |
-| 4. Checks | `checks/`: contract, policy, naming, gitleaks, test stage, Trivy |
+| 4. Checks | `checks/`: contract, policy, naming, test stage |
 | 5. Orchestrator | `orchestrator/` gains the queue and worker, backoff, release-only mode (`semver/`), the infrastructure tier and the reconcile loop; `docker/` gains the event stream |
 | 7. Notifications, self-update | `notify/` (Discord); `lighthouse self-update` mode |
 
@@ -1265,10 +1263,10 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
    - Compose projects and multiple services ([16.9](#169-compose-projects-and-services-decided-2026-10-06)); `name:service`; `remove` takes the containers down (`--keep` leaves them).
    - Migration `00003`; the `compose` package; tests against real Compose and Docker, including a real rollback.
    - Fixed along the way: B1, B6–B10, B13, B18, B19, S7; partly B11.
-   - Moved to later steps: the health URL setting and the secret prefix (step 4), the test stage and image scan (step 4), approval and backups for infrastructure projects (step 5).
+   - Moved to later steps: the health URL setting and the secret prefix (step 4), the test stage (step 4), approval and backups for infrastructure projects (step 5).
 4. **Checks:**
-   - Contract and policy, naming and existence, gitleaks.
-   - Test stage, Trivy.
+   - Contract and policy, naming and existence.
+   - Test stage. (Trivy and gitleaks were dropped: [16.10](#1610-decisions-2026-10-06).)
 5. **Orchestrator:**
    - Queue and worker, polling with ETags.
    - Release-only mode, the infrastructure tier, the reconcile loop.
@@ -1286,9 +1284,9 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
 
 A project's nickname, its repository, its compose project and its containers are four different things, and only the first two are chosen in Lighthouse.
 
-| Name | Comes from | Example (`add personalWebsite github.com/lsariol/landing`) |
+| Name | Comes from | Example (`add github.com/lsariol/landing`) |
 |---|---|---|
-| Nickname | `add <name>`; `rename` changes only this | `personalWebsite` |
+| Name | The repository's name, or `--name` when that's taken; `rename` changes only this | `landing` |
 | Repository | `add … <url>`, `set-url` | `lsariol/landing` |
 | Compose project | **The compose file's `name:`**, read at every deploy and stored; the lowercased repo name if there is none. Lighthouse always runs `docker compose -p <it>` | `website` |
 | Services | Found through Compose's labels (`com.docker.compose.project` / `.service`), never guessed from names | `web`, `www`, `bot` |
@@ -1298,11 +1296,20 @@ A project's nickname, its repository, its compose project and its containers are
 **Rules that come with it:**
 - **A compose project belongs to one Lighthouse project.** A deploy that would take over another project's compose project is refused, naming the other project.
 - **Healthy** means every service with a `restart:` policy is running; a service without one (a one-off job such as migrations) may have exited cleanly.
-- **The secret prefix** (for the step-4 rule that a project only gets its own keys) is stored per project, defaulting from the nickname (`PERSONALWEBSITE_`) and changeable, since existing Cove keys may use another name.
+- **The secret prefix** (for the step-4 rule that a project only gets its own keys) is the compose project's name in capitals (`WEBSITE_`), so there's nothing to set ([16.10](#1610-decisions-2026-10-06)).
 - **Unique names on `spark`** ([B21](#b21-service-names-can-collide-on-the-spark-network)).
 - History stays per project (a deploy covers every service); rollback image tags are per service (`website-bot:<commit>`).
 
 **Migration:** a new migration adds `compose_project` and `secret_prefix` to `projects`; existing rows get the lowercased repo name (today's rule), so nothing changes until a project's next deploy reads its real `name:`.
+
+### 16.10 Decisions (2026-10-06)
+
+- **Hands-off.** Lighthouse is meant to run a self-hosted ecosystem without anyone logging into the server to set or change rules for each project. One-time setup (the server, Cove, sparkdb's roles) is fine; anything per project is decided by the repository itself, or by a rule that needs no per-project input.
+- **Names.** `add <url>` names the project after the repository (lowercase; anything but letters, digits, `-` and `_` becomes `-`). `--name <name>` exists only for when that name is taken: the error says so, and on a terminal `add` asks for another name instead.
+- **Secret prefix = the compose project.** A project may read the Cove keys that start with its compose project's name in capitals (`-` becomes `_`; compose project `website` reads `WEBSITE_*`), plus `SHARED_*`. Nothing to set per project.
+- **Strict storage.** A project's host folders are only under `/srv/server/storage/<compose project>/`. Named volumes are fine. With sparkdb's data moved there, no current project needs an exception.
+- **Trivy and gitleaks are dropped.** Secrets come from Cove at deploy time, and image scanning is noise for a one-owner home server. A project that wants scanners runs them in its own Dockerfile `test` stage.
+- **Open:** where policy exceptions live, should one ever be needed: a file in Lighthouse's own repository (recommended: reviewed in git, deployed like everything else) or the database through the CLI.
 
 ---
 

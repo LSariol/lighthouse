@@ -17,7 +17,7 @@ func (c *CLI) start(ctx context.Context, args []string) error {
 	if err := c.svc.Start(ctx, args[1]); err != nil {
 		return err
 	}
-	success(fmt.Sprintf("Started %s.", args[1]))
+	success(fmt.Sprintf("Started %q.", args[1]))
 	return nil
 }
 
@@ -35,14 +35,14 @@ func (c *CLI) stop(ctx context.Context, args []string) error {
 		return c.eachProject(ctx, "stop", "Stopped", c.svc.Stop)
 	}
 
-	ok, err := c.confirmOrRefuse(fmt.Sprintf("Stop %s? It stays offline until started or deployed again.", rest[0]), skip, "stop")
+	ok, err := c.confirmOrRefuse(fmt.Sprintf("Stop %q? It stays offline until started or deployed again.", rest[0]), skip, "stop")
 	if !ok || err != nil {
 		return err
 	}
 	if err := c.svc.Stop(ctx, rest[0]); err != nil {
 		return err
 	}
-	success(fmt.Sprintf("Stopped %s. \"start %s\" brings it back.", rest[0], rest[0]))
+	success(fmt.Sprintf("Stopped %q. \"start %s\" brings it back.", rest[0], rest[0]))
 	return nil
 }
 
@@ -63,22 +63,23 @@ func (c *CLI) restart(ctx context.Context, args []string) error {
 	if err := c.svc.Restart(ctx, rest[0]); err != nil {
 		return err
 	}
-	success(fmt.Sprintf("Restarted %s.", rest[0]))
+	success(fmt.Sprintf("Restarted %q.", rest[0]))
 	return nil
 }
 
 const defaultLogLines = 50
 
 func (c *CLI) logs(ctx context.Context, args []string) error {
+	const form = "logs <name[:service]> [lines]"
 	if len(args) < 2 || len(args) > 3 {
-		return usageError{form: "logs <name[:service]> [lines]"}
+		return usageError{form: form}
 	}
 
 	lines := defaultLogLines
 	if len(args) == 3 {
 		n, err := strconv.Atoi(args[2])
 		if err != nil || n < 1 {
-			return usageError{reason: fmt.Sprintf("%q isn't a positive number of lines.", args[2]), form: "logs <name[:service]> [lines]"}
+			return usageError{reason: fmt.Sprintf("%q isn't a positive number of lines.", args[2]), form: form}
 		}
 		lines = n
 	}
@@ -88,7 +89,7 @@ func (c *CLI) logs(ctx context.Context, args []string) error {
 		return err
 	}
 	if output == "" {
-		info(fmt.Sprintf("%s hasn't written any output.", args[1]))
+		info(fmt.Sprintf("%q hasn't written any output.", args[1]))
 		return nil
 	}
 	fmt.Fprint(stdout, output)
