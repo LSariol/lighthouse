@@ -3,12 +3,11 @@ package builder
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/LSariol/LightHouse/internal/models"
-	"github.com/lsariol/coveclient"
 	"github.com/docker/docker/client"
+	"github.com/lsariol/coveclient"
 )
 
 type Builder struct {
@@ -16,7 +15,6 @@ type Builder struct {
 	CC        *coveclient.Client
 	Ctx       context.Context
 	WatchList []models.WatchedRepo
-	BasePath  string
 }
 
 func NewBuilder(dh *client.Client, cc *coveclient.Client, ctx context.Context) *Builder {
@@ -77,47 +75,6 @@ func (b *Builder) Build(repo models.WatchedRepo) error {
 	}
 
 	fmt.Println("Clean Complete")
-
-	return nil
-}
-
-func ErrorHandler() {
-
-}
-
-// Run containers if they already exist.
-func (b *Builder) InitilizeContainers(watchList []models.WatchedRepo) error {
-
-	for _, model := range watchList {
-		// If container is running, good
-		containerName := strings.ToLower(model.ContainerName)
-		status, err := b.IsContainerRunning(containerName)
-		if err != nil {
-			return err
-		}
-		if status {
-			fmt.Println(containerName + " is already running.")
-			return nil
-		}
-
-		err = b.StartContainer(containerName)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func InitilizeOriginalPath() string {
-	originalPath, _ := os.Getwd()
-
-	return originalPath
-}
-
-func (b *Builder) LoadPaths() error {
-
-	b.BasePath = os.Getenv("BASE_PATH")
 
 	return nil
 }

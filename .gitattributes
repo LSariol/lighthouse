@@ -1,0 +1,2 @@
+# Go source is always LF, so gofmt agrees on Windows and in CI.
+*.go text eol=lf

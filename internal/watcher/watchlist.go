@@ -82,41 +82,6 @@ func (w *Watcher) ChangeRepoName(currentName string, name string) error {
 	return nil
 }
 
-func (w *Watcher) ChangeRepoURL(dName string, newURL string) error {
-	updated := false
-
-	if w.checkURLConflicts(dName, newURL) {
-		return fmt.Errorf("this url is already being watched under a different name")
-	}
-
-	for i := range w.WatchList {
-		if w.WatchList[i].DisplayName == dName {
-
-			_, apiURL, downloadURL, err := parseURL(newURL)
-			if err != nil {
-				return fmt.Errorf("changeRepoURL: %w", err)
-			}
-
-			w.WatchList[i].URL = newURL
-			lastModified := time.Now()
-			w.WatchList[i].Stats.Meta.LastModifiedAt = &lastModified
-			w.WatchList[i].APIURL = apiURL
-			w.WatchList[i].DownloadURL = downloadURL
-			w.WatchList[i].DisplayName = dName
-			updated = true
-			break
-		}
-	}
-
-	if !updated {
-		return fmt.Errorf("changeRepoURL: %s does not exist", dName)
-	}
-
-	w.storeWatchList()
-
-	return nil
-}
-
 func (w *Watcher) UpdateRepo(dName string, newURL string) error {
 	updated := false
 
@@ -183,17 +148,6 @@ func (w *Watcher) checkNamingConflicts(name string, currentName string) bool {
 
 	for _, repo := range w.WatchList {
 		if repo.DisplayName == name && repo.DisplayName != currentName {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (w *Watcher) checkURLConflicts(name string, currentURL string) bool {
-
-	for _, repo := range w.WatchList {
-		if repo.URL == currentURL && repo.DisplayName != name {
 			return true
 		}
 	}

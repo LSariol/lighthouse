@@ -18,13 +18,12 @@ type Watcher struct {
 	Builder   *builder.Builder
 	Ctx       context.Context
 	WatchList []models.WatchedRepo
-	HomePath  string
 	GitToken  string
 	paused    atomic.Bool
 }
 
-func (w *Watcher) Pause()  { w.paused.Store(true) }
-func (w *Watcher) Resume() { w.paused.Store(false) }
+func (w *Watcher) Pause()         { w.paused.Store(true) }
+func (w *Watcher) Resume()        { w.paused.Store(false) }
 func (w *Watcher) IsPaused() bool { return w.paused.Load() }
 
 func NewWatcher(cloveClient *coveclient.Client, http *http.Client, builder *builder.Builder, ctx context.Context) *Watcher {
@@ -81,7 +80,6 @@ func (w *Watcher) Scan() error {
 			repo = models.UpdateUpdateStats(repo, currentHash)
 			err := w.Builder.Build(repo)
 			if err != nil {
-				builder.ErrorHandler()
 				return fmt.Errorf("scanner.scan() - error in build: %v", err)
 			}
 

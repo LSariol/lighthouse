@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -23,30 +22,6 @@ func (b *Builder) StopContainer(name string) error {
 
 func (b *Builder) RestartContainer(name string) error {
 	return b.Docker.ContainerRestart(b.Ctx, name, container.StopOptions{})
-}
-
-func (b *Builder) GetAllContainers() ([]types.Container, error) {
-
-	containers, err := b.Docker.ContainerList(b.Ctx, container.ListOptions{
-		All: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list containers: %w", err)
-	}
-
-	return containers, nil
-}
-
-func (b *Builder) GetRunningContainers() ([]types.Container, error) {
-
-	containers, err := b.Docker.ContainerList(b.Ctx, container.ListOptions{
-		All: false,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list containers: %w", err)
-	}
-
-	return containers, nil
 }
 
 func (b *Builder) IsContainerRunning(nameOrId string) (bool, error) {

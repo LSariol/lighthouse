@@ -13,7 +13,7 @@ func cleanUp() error {
 	if err != nil {
 		return fmt.Errorf("failed to clean staging area at %s: %w", os.Getenv("STAGING_PATH"), err)
 	}
-	err = os.MkdirAll(os.Getenv("STAGING_PATH")+"/Working", 0755)
+	err = os.MkdirAll(os.Getenv("STAGING_PATH"), 0755)
 	if err != nil {
 		return fmt.Errorf("failed to recreate staging area at %s: %w", os.Getenv("STAGING_PATH"), err)
 	}
