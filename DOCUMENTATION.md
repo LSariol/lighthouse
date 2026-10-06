@@ -346,7 +346,7 @@ networks:
 | Keys Lighthouse reads for itself | `LIGHTHOUSE_GITHUB_TOKEN` (GitHub token), at startup only |
 | Keys it reads for projects | Every `${KEY}` in each project's compose file, as one `GetSecrets` batch per deploy |
 | Audit | Every read shows as `lighthouse` in Cove's `history <KEY>` |
-| Keys reserved for the v1.0.0 database | `LIGHTHOUSE_DATABASE_URL`, `LIGHTHOUSE_DATABASE_MIGRATOR_URL`, and the role passwords `LIGHTHOUSE_DATABASE_{APP,MIGRATOR,READER}_PASSWORD` (the existing `LIGHTHOUSE_APP_PASSWORD` / `_OWNER_` / `_READER_` keys get renamed to these) |
+| Keys reserved for the v1.0.0 database | `LIGHTHOUSE_DATABASE_URL` (app), `LIGHTHOUSE_MIGRATOR_DATABASE_URL` (the server's convention for migrator URLs: `<PROJECT>_MIGRATOR_DATABASE_URL`), and the role passwords `LIGHTHOUSE_DATABASE_{APP,MIGRATOR,READER}_PASSWORD` (the existing `LIGHTHOUSE_APP_PASSWORD` / `_OWNER_` / `_READER_` keys get renamed to these) |
 
 **First start (bootstrap):**
 
@@ -497,12 +497,12 @@ Tables and their grants come later, from Lighthouse's migrations.
    Then:
    ```bash
    docker exec cove /cove create LIGHTHOUSE_DATABASE_URL "postgres://lighthouse_app:$(docker exec cove /cove get LIGHTHOUSE_DATABASE_APP_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
-   docker exec cove /cove create LIGHTHOUSE_DATABASE_MIGRATOR_URL "postgres://lighthouse_migrator:$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
+   docker exec cove /cove create LIGHTHOUSE_MIGRATOR_DATABASE_URL "postgres://lighthouse_migrator:$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_PASSWORD)@sparkdb:5432/lighthouse_db?sslmode=disable"
    ```
 6. **Check both logins:**
    ```bash
    docker exec sparkdb psql "$(docker exec cove /cove get LIGHTHOUSE_DATABASE_URL)" -Atc "select current_user"            # lighthouse_app
-   docker exec sparkdb psql "$(docker exec cove /cove get LIGHTHOUSE_DATABASE_MIGRATOR_URL)" -Atc "select current_user"   # lighthouse_owner
+   docker exec sparkdb psql "$(docker exec cove /cove get LIGHTHOUSE_MIGRATOR_DATABASE_URL)" -Atc "select current_user"   # lighthouse_owner
    ```
 7. **Clean up:** `rm /tmp/check.sql /tmp/setup.sql`, and tick the entry in the prod rollout plan.
 
@@ -601,13 +601,15 @@ What protects what today, and what is left to you. Issues are in [§15](#securit
 Needs Go 1.27.1 and Docker. On Windows, run the commands in PowerShell or Git Bash from the repository folder.
 
 ```bash
-cp .env.example .env        # point COVE_URL at a dev Cove; keep the token file outside the repository
+cp .env.example .env        # point COVE_URL at your dev Cove
 mkdir .dev; echo [] > .dev/repos.json
 go run ./cmd/lighthouse serve     # one terminal: the daemon
 go run ./cmd/lighthouse shell     # another: the prompt (or: go run ./cmd/lighthouse status)
 ```
 
 Success: the daemon logs `Lighthouse starting`, then `waiting for …` or `Lighthouse ready`; `status` in the other terminal answers. VS Code has launch configurations for both (`.vscode/launch.json`).
+
+**Everything stays in the repository.** A local run reads and writes only inside `.dev/`: the watchlist, the staging and download folders, the control socket and the dev Cove token. `.dev/` is gitignored and kept out of Docker builds. Go tests use temporary folders that the test runner removes afterwards.
 
 **Checks before a commit** (CI runs the same on every push to `main` and `release/**`):
 
@@ -1101,7 +1103,7 @@ The layout from the foundation ([§3](#3-architecture)) is the v1.0.0 layout; th
 
 ### 16.7 Database design
 
-**Admin, by hand, once:** roles, the database, ownership and connect rights are server-wide, so no migration can do them. `scripts/db/setup.sql` does them, and [§10.1](#101-database-setup-once-by-hand) is the step-by-step. Connection strings go in Cove as `LIGHTHOUSE_DATABASE_URL` (app) and `LIGHTHOUSE_DATABASE_MIGRATOR_URL`; Lighthouse reads them from Cove at startup with its own token.
+**Admin, by hand, once:** roles, the database, ownership and connect rights are server-wide, so no migration can do them. `scripts/db/setup.sql` does them, and [§10.1](#101-database-setup-once-by-hand) is the step-by-step. Connection strings go in Cove as `LIGHTHOUSE_DATABASE_URL` (app) and `LIGHTHOUSE_MIGRATOR_DATABASE_URL`; Lighthouse reads them from Cove at startup with its own token.
 
 **Migrations** (`internal/database/migrations/`, schema `lighthouse`, goose table `lighthouse.goose_db_version`, embedded, applied on startup under an advisory lock):
 
@@ -1175,7 +1177,7 @@ Remove or fix before v1.0.0. Done in the foundation unless marked *open*:
 | Port `2000:2000`, `RUN mkdir -p /app/lighthouse` | Unused |
 | `.env.exmaple`, `config/repos.json.exmaple` | Typo: rename to `.example`; `.env.example` should list only what's needed for local dev |
 | `notes.md`, `todo.txt`, `lighthouse.example.yaml` | Fold anything still wanted into this document, then delete |
-| `RawGitResponse.json`, `cove-token`, `.env`, `Server/` in the working copy | *Open, on your PC only* (gitignored, never committed): delete `RawGitResponse.json`; move the dev token outside the repo (`.env.example` shows `../lighthouse-dev/cove-token`); in `.env`, rename `COVE_ADDRESS` to `COVE_URL` and drop `APP_ENV_PATH` |
+| `RawGitResponse.json`, `cove-token`, `.env`, `Server/` in the working copy | Done 2026-10-06: `.env` updated, the dev token moved to `.dev/cove-token`. *Open, on your PC only:* delete `RawGitResponse.json` and the old `Server/` folder |
 | `.vscode/launch.json` `ENVIRONMENT=dev` | Not read by anything |
 | `go.mod` `go 1.25.1` / Dockerfile `golang:1.25.1-alpine` | Bump both to 1.27.1 together |
 | Old README claims | `LIGHTHOUSE_GITHUB_PAT`, `COVE_CLIENT_SECRET`, `PROJECT_CONTEXT.md` and the `LuSracol/Cove` link were all out of date. Fixed in the new README |
