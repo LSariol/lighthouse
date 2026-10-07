@@ -129,23 +129,6 @@ func isPermissionDenied(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "42501"
 }
 
-func TestImport(t *testing.T) {
-	db := open(t)
-	ctx := context.Background()
-
-	p := projects.Project{Name: "cove", Repo: github.Repo{Owner: "LSariol", Name: "Cove"}, DeployedSHA: "abc", Checks: 119}
-	if err := db.Import(ctx, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Import(ctx, p); !errors.Is(err, projects.ErrNameTaken) {
-		t.Errorf("a second import = %v, want ErrNameTaken", err)
-	}
-	got, _ := db.Get(ctx, "cove")
-	if got.DeployedSHA != "abc" || got.Checks != 119 || got.CreatedAt.IsZero() {
-		t.Errorf("imported %+v", got)
-	}
-}
-
 func TestUnreachable(t *testing.T) {
 	const nowhere = "postgres://x:y@127.0.0.1:1/db?connect_timeout=2"
 	_, err := Connect(context.Background(), nowhere)

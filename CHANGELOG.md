@@ -2,6 +2,17 @@
 
 All notable changes to Lighthouse. Versions follow [semantic versioning](https://semver.org).
 
+## [1.0.2] — unreleased
+
+### Fixed
+- **A project's settings come only from its default branch.** Deploying an older tag whose compose file predates its `x-lighthouse` block flipped the project back to deploying its branch, which then redeployed it. `deploy` and `check` also read the branch's settings first, so a release-mode project that hasn't been checked yet deploys its newest release.
+
+### Removed
+- `lighthouse import` and its `repos.json` reader: the move from pre-1.0 is done (v1.0.1's DOCUMENTATION.md §10 has the steps).
+
+### Changed
+- Comments trimmed throughout: none inside functions unless they prevent a mistake, one-line descriptions. No behaviour change.
+
 ## [1.0.1] — 2026-10-07
 
 ### Fixed

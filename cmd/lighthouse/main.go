@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,8 +27,6 @@ import (
 	"github.com/lsariol/lighthouse/internal/github"
 	"github.com/lsariol/lighthouse/internal/orchestrator"
 	"github.com/lsariol/lighthouse/internal/policy"
-	"github.com/lsariol/lighthouse/internal/projects"
-	"github.com/lsariol/lighthouse/internal/reposjson"
 )
 
 // retryEvery is how long startup waits before trying an unreachable Cove or
@@ -59,8 +56,6 @@ func main() {
 		runShell()
 	case "migrate":
 		runMigrate(args[1:])
-	case "import":
-		runImport(args[1:])
 	case "version", "--version":
 		fmt.Println(buildVersion(loadConfig()))
 	case "health":
@@ -80,7 +75,6 @@ func printUsage(w io.Writer) {
   lighthouse <command> [args]   Run one CLI command and exit
   lighthouse migrate [status|up]
                                 Show or apply database migrations
-  lighthouse import <file|->    Move a pre-1.0 repos.json into the database
   lighthouse version            Print the version
   lighthouse health             Exit 0 if the daemon answers (the container's healthcheck)
   lighthouse self-update <file> The update helper's work (Lighthouse starts it itself)
@@ -308,8 +302,7 @@ func runCommand(args []string) int {
 	return 0
 }
 
-// adminSecrets reads Lighthouse's secrets from Cove for the admin modes
-// (migrate, import), which run next to the daemon with the same settings.
+// adminSecrets reads Lighthouse's secrets from Cove for `lighthouse migrate`.
 func adminSecrets(ctx context.Context, cfg config.Config) cove.Secrets {
 	if err := cfg.ValidateCove(); err != nil {
 		fatal(err)
@@ -352,61 +345,6 @@ func runMigrate(args []string) {
 	}
 	if err != nil {
 		fatal(err)
-	}
-}
-
-// runImport handles `lighthouse import <file|->`: it adds every project in a
-// pre-1.0 repos.json to the database, with its recorded state.
-func runImport(args []string) {
-	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "! Usage: lighthouse import <file|->   (- reads standard input)")
-		os.Exit(1)
-	}
-
-	var in io.Reader = os.Stdin
-	if args[0] != "-" {
-		f, err := os.Open(args[0])
-		if err != nil {
-			fatal(err)
-		}
-		defer f.Close()
-		in = f
-	}
-	list, err := reposjson.Read(in)
-	if err != nil {
-		fatal(err)
-	}
-
-	ctx := context.Background()
-	secrets := adminSecrets(ctx, loadConfig())
-
-	db, err := database.Connect(ctx, secrets.DatabaseURL)
-	if err != nil {
-		fatal(err)
-	}
-	defer db.Close()
-	if err := db.CheckSchemaVersion(ctx); err != nil {
-		fatal(err)
-	}
-
-	imported, skipped, failed := 0, 0, 0
-	for _, p := range list {
-		switch err := db.Import(ctx, p); {
-		case err == nil:
-			fmt.Fprintf(os.Stderr, "✓ Imported %s (%s)\n", p.Name, p.Repo.URL())
-			imported++
-		case errors.Is(err, projects.ErrNameTaken) || errors.Is(err, projects.ErrRepoWatched):
-			fmt.Fprintf(os.Stderr, "! Skipped %s: it's already in the database\n", p.Name)
-			skipped++
-		default:
-			fmt.Fprintf(os.Stderr, "✗ %s: %v\n", p.Name, err)
-			failed++
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "%d imported, %d already there, %d failed.\n", imported, skipped, failed)
-	if failed > 0 {
-		os.Exit(1)
 	}
 }
 

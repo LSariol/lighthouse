@@ -82,8 +82,7 @@ func env(name string) string {
 	return strings.TrimSpace(os.Getenv(name))
 }
 
-// ValidateCove checks the settings needed to reach Cove, for the admin modes
-// (migrate, import) that read Lighthouse's secrets but don't deploy.
+// ValidateCove checks the settings `lighthouse migrate` needs to reach Cove.
 func (c Config) ValidateCove() error {
 	if c.CoveURL == "" || c.CoveTokenPath == "" {
 		return fmt.Errorf("COVE_URL and COVE_TOKEN_PATH must be set. In Docker, run this inside the container: docker exec -i lighthouse /lighthouse ...")

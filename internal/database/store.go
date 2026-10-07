@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -289,22 +288,4 @@ func (d *Database) Deployment(ctx context.Context, name string, n int) (projects
 		dep.Steps = append(dep.Steps, st)
 	}
 	return dep, rows.Err()
-}
-
-// Import adds a project with its recorded state, as read from a pre-1.0
-// repos.json.
-func (d *Database) Import(ctx context.Context, p projects.Project) error {
-	if err := projects.ValidateName(p.Name); err != nil {
-		return err
-	}
-	created := p.CreatedAt
-	if created.IsZero() {
-		created = time.Now()
-	}
-	_, err := d.pool.Exec(ctx, `INSERT INTO lighthouse.projects
-		(name, repo_owner, repo_name, created_at, deployed_sha, deployed_at, last_checked_at, check_count, last_error, last_error_at)
-		VALUES ($1, $2, $3, $4, nullif($5, ''), $6, $7, $8, nullif($9, ''), $10)`,
-		p.Name, p.Repo.Owner, p.Repo.Name, created, p.DeployedSHA, p.DeployedAt,
-		p.LastCheckedAt, p.Checks, projects.ErrorText(projects.ErrorString(p.LastError)), p.LastErrorAt)
-	return constraintError(err)
 }
