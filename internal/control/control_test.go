@@ -48,6 +48,10 @@ func (f *fakeService) Deploy(ctx context.Context, name string, version string) e
 	f.record(strings.TrimSpace("deploy " + name + " " + version))
 	return errors.New("something internal broke")
 }
+func (f *fakeService) Rollback(ctx context.Context, name string) (string, error) {
+	f.record("rollback " + name)
+	return "v1.0.0 (abc1234)", nil
+}
 func (f *fakeService) Retry(ctx context.Context, name string) error {
 	f.record("retry " + name)
 	return nil

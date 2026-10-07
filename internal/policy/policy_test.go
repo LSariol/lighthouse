@@ -115,29 +115,29 @@ func TestEachRuleRefuses(t *testing.T) {
 		{map[string]any{"security_opt": []string{"label:disable"}}, nil, "security_opt:label:disable"},
 		{map[string]any{"volumes_from": []string{"container:cove"}}, nil, "volumes_from:container:cove"},
 		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}}}, nil,
-			"mount:" + filepath.Clean("/var/run/docker.sock")},
-		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": "/", "target": "/host", "read_only": true}}}, nil, "mount:" + filepath.Clean("/")},
+			"mount:" + filepath.ToSlash(filepath.Clean("/var/run/docker.sock"))},
+		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": "/", "target": "/host", "read_only": true}}}, nil, "mount:" + filepath.ToSlash(filepath.Clean("/"))},
 		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": filepath.Join(s.storage, "cove", ".env"), "target": "/x"}}}, nil,
-			"mount:" + filepath.Join(s.storage, "cove", ".env")},
+			"mount:" + filepath.ToSlash(filepath.Join(s.storage, "cove", ".env"))},
 		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": filepath.Join(s.storage, "site-other"), "target": "/x"}}}, nil,
-			"mount:" + filepath.Join(s.storage, "site-other")},
+			"mount:" + filepath.ToSlash(filepath.Join(s.storage, "site-other"))},
 		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": filepath.Join(s.dir, "..", "..", "cove"), "target": "/x"}}}, nil,
-			"mount:" + filepath.Clean(filepath.Join(s.dir, "..", "..", "cove"))},
-		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": "/etc/localtime", "target": "/etc/localtime"}}}, nil, "mount:" + filepath.Clean("/etc/localtime")},
-		{map[string]any{"env_file": []any{map[string]any{"path": "/app/vault/cove/token"}}}, nil, "file:" + filepath.Clean("/app/vault/cove/token")},
-		{map[string]any{"build": map[string]any{"context": "/"}}, nil, "file:" + filepath.Clean("/")},
-		{map[string]any{"build": map[string]any{"context": s.dir, "dockerfile": "/etc/shadow"}}, nil, "file:" + filepath.Clean("/etc/shadow")},
-		{map[string]any{"build": map[string]any{"context": s.dir, "additional_contexts": map[string]string{"x": "/etc"}}}, nil, "file:" + filepath.Clean("/etc")},
+			"mount:" + filepath.ToSlash(filepath.Clean(filepath.Join(s.dir, "..", "..", "cove")))},
+		{map[string]any{"volumes": []any{map[string]any{"type": "bind", "source": "/etc/localtime", "target": "/etc/localtime"}}}, nil, "mount:" + filepath.ToSlash(filepath.Clean("/etc/localtime"))},
+		{map[string]any{"env_file": []any{map[string]any{"path": "/app/vault/cove/token"}}}, nil, "file:" + filepath.ToSlash(filepath.Clean("/app/vault/cove/token"))},
+		{map[string]any{"build": map[string]any{"context": "/"}}, nil, "file:" + filepath.ToSlash(filepath.Clean("/"))},
+		{map[string]any{"build": map[string]any{"context": s.dir, "dockerfile": "/etc/shadow"}}, nil, "file:" + filepath.ToSlash(filepath.Clean("/etc/shadow"))},
+		{map[string]any{"build": map[string]any{"context": s.dir, "additional_contexts": map[string]string{"x": "/etc"}}}, nil, "file:" + filepath.ToSlash(filepath.Clean("/etc"))},
 		{map[string]any{"build": map[string]any{"context": s.dir, "privileged": true}}, nil, "build:privileged"},
 		{map[string]any{"build": map[string]any{"context": s.dir, "network": "host"}}, nil, "build:network:host"},
 		{map[string]any{"build": map[string]any{"context": s.dir, "entitlements": []string{"security.insecure"}}}, nil, "build:entitlement:security.insecure"},
 		{nil, map[string]any{"volumes": map[string]any{"data": map[string]any{"name": "cove_data", "external": true}}}, "volume:cove_data"},
 		{nil, map[string]any{"volumes": map[string]any{"etc": map[string]any{"name": "site_etc", "driver_opts": map[string]string{"type": "none", "o": "bind", "device": "/etc"}}}},
-			"mount:" + filepath.Clean("/etc")},
+			"mount:" + filepath.ToSlash(filepath.Clean("/etc"))},
 		{nil, map[string]any{"networks": map[string]any{"spark": map[string]any{"name": "spark", "external": true}, "w": map[string]any{"name": "website_default", "external": true}}},
 			"network:website_default"},
-		{nil, map[string]any{"secrets": map[string]any{"s": map[string]any{"file": "/etc/shadow"}}}, "file:" + filepath.Clean("/etc/shadow")},
-		{nil, map[string]any{"configs": map[string]any{"c": map[string]any{"file": "/etc/passwd"}}}, "file:" + filepath.Clean("/etc/passwd")},
+		{nil, map[string]any{"secrets": map[string]any{"s": map[string]any{"file": "/etc/shadow"}}}, "file:" + filepath.ToSlash(filepath.Clean("/etc/shadow"))},
+		{nil, map[string]any{"configs": map[string]any{"c": map[string]any{"file": "/etc/passwd"}}}, "file:" + filepath.ToSlash(filepath.Clean("/etc/passwd"))},
 		{map[string]any{"container_name": "cove"}, nil, "name:cove"},
 		{map[string]any{"networks": map[string]any{"spark": map[string]any{"aliases": []string{"db"}}}}, nil, "name:db"},
 	}
@@ -198,8 +198,8 @@ func TestSymlinkOutOfOwnFolders(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := ids(f); !slices.Equal(got, []string{"link:" + src}) {
-			t.Errorf("%s: findings %v, want [link:%s]", src, got, src)
+		if got := ids(f); !slices.Equal(got, []string{"link:" + filepath.ToSlash(src)}) {
+			t.Errorf("%s: findings %v, want [link:%s]", src, got, filepath.ToSlash(src))
 		}
 	}
 }
@@ -215,7 +215,7 @@ func TestRealSymlink(t *testing.T) {
 		map[string]any{"type": "bind", "source": link, "target": "/x"},
 		map[string]any{"type": "bind", "source": filepath.Join(link, "sub", "new"), "target": "/y"},
 	}}, nil)))
-	want := []string{"link:" + link, "link:" + filepath.Join(link, "sub", "new")}
+	want := []string{"link:" + filepath.ToSlash(link), "link:" + filepath.ToSlash(filepath.Join(link, "sub", "new"))}
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("findings %v, want %v", got, want)

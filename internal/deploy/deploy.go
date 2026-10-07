@@ -54,6 +54,8 @@ type Compose interface {
 	Build(ctx context.Context, dir string, project string, env []string, out io.Writer) error
 	BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error
 	Exec(ctx context.Context, container string, command []string, stdout io.Writer) error
+	RunDetached(ctx context.Context, name string, image string, volumes []string, command []string) error
+	RemoveContainer(ctx context.Context, name string) error
 	Up(ctx context.Context, dir string, project string, env []string, out io.Writer) error
 }
 
@@ -110,6 +112,9 @@ type Options struct {
 	Storage string
 	// Policy holds the exceptions to the deploy rules (policy.json).
 	Policy policy.Policy
+	// Self is Lighthouse's own compose project, "" when it doesn't run in
+	// Docker. Its deploys hand off to the update helper (selfupdate.go).
+	Self string
 	// Backups is where database backups go: <Backups>/<compose project>/.
 	// The newest KeepBackups of each project are kept.
 	Backups  string
@@ -130,6 +135,7 @@ type Deployer struct {
 	root     string
 	storage  string
 	backups  string
+	self     string
 	policy   policy.Policy
 	timeouts Timeouts
 	log      io.Writer
@@ -160,7 +166,7 @@ func New(c Compose, d Docker, s Source, sec Secrets, opts Options) *Deployer {
 	if poll == 0 {
 		poll = 2 * time.Second
 	}
-	return &Deployer{compose: c, docker: d, source: s, secrets: sec, root: opts.Root, storage: opts.Storage, backups: opts.Backups, policy: opts.Policy,
+	return &Deployer{compose: c, docker: d, source: s, secrets: sec, root: opts.Root, storage: opts.Storage, backups: opts.Backups, self: opts.Self, policy: opts.Policy,
 		timeouts: t, log: log, poll: poll}
 }
 
@@ -169,6 +175,7 @@ type Request struct {
 	Project projects.Project
 	SHA     string // the commit to deploy
 	Version string // the release it is (v1.2.3), or "" for a commit on the branch
+	Trigger string // what started it (projects.Trigger*), kept with a self-update's hand-off
 	Token   string // GitHub token, for the download
 
 	// Claim is called with the compose project the compose file names, before
@@ -186,8 +193,12 @@ type Result struct {
 	ComposeProject string // as the compose file names it, once inspected
 	// Settings are the commit's x-lighthouse settings, once inspected.
 	Settings settings.Settings
-	Steps    []projects.Step
-	Err      error // nil on success
+	// HandedOff means this was Lighthouse's own deploy, now in the update
+	// helper's hands: nothing is recorded yet (HandOffs has it later), and
+	// this Lighthouse is about to be replaced.
+	HandedOff bool
+	Steps     []projects.Step
+	Err       error // nil on success
 }
 
 // The steps, in order.
@@ -229,7 +240,12 @@ type run struct {
 	previous map[string]string // service → image ID running before the swap
 	prevEnv  []string          // the previous version's secrets, fetched before the swap
 	settings settings.Settings // the commit's x-lighthouse settings
-	dry      bool              // Check: change nothing, stop after the test step
+	started  time.Time
+	// fallbackDir is where a rollback runs when the previous version's
+	// folder isn't kept (the update helper: the new folder, with the
+	// previous images put back).
+	fallbackDir string
+	dry         bool // Check: change nothing, stop after the test step
 }
 
 // Deploy deploys req.Project at req.SHA. A second call waits for the first.
@@ -237,13 +253,15 @@ func (d *Deployer) Deploy(ctx context.Context, req Request) Result {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	r := &run{d: d, req: req, log: slog.With("project", req.Project.Name, "sha", short(req.SHA))}
+	r := &run{d: d, req: req, log: slog.With("project", req.Project.Name, "sha", short(req.SHA)), started: time.Now()}
 	r.log.Info("deploy started")
 	res := r.deploy(ctx)
 	res.Steps = r.steps
 
-	switch res.Status {
-	case projects.StatusSucceeded:
+	switch {
+	case res.HandedOff:
+		r.log.Info("deploy handed off to the update helper", "helper", HelperName)
+	case res.Status == projects.StatusSucceeded:
 		r.log.Info("deploy finished")
 	default:
 		r.log.Error("deploy failed", "status", res.Status, "step", res.FailedStep, "kind", res.FailureKind, "err", res.Err)
@@ -258,7 +276,7 @@ func (d *Deployer) Check(ctx context.Context, req Request) Result {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	r := &run{d: d, req: req, dry: true, log: slog.With("project", req.Project.Name, "sha", short(req.SHA), "check", true)}
+	r := &run{d: d, req: req, dry: true, log: slog.With("project", req.Project.Name, "sha", short(req.SHA), "check", true), started: time.Now()}
 	res := r.deploy(ctx)
 	res.Steps = r.steps
 	return res
@@ -329,6 +347,8 @@ func (r *run) deploy(ctx context.Context) Result {
 		r.removeUnlessCurrent(dir)
 		return fail(StepSecrets, f)
 	}
+	secrets := len(env)
+	env = append(env, deployVars(r.req.SHA, r.req.Version)...)
 
 	if f := r.step(ctx, StepBuild, func(ctx context.Context, out io.Writer) *failure {
 		return r.build(ctx, dir, project, env, out)
@@ -342,6 +362,17 @@ func (r *run) deploy(ctx context.Context) Result {
 	}); f != nil {
 		r.removeUnlessCurrent(dir)
 		return fail(StepBackup, f)
+	}
+
+	if r.d.self != "" && project.Name == r.d.self {
+		if f := r.step(ctx, StepHandOff, func(ctx context.Context, out io.Writer) *failure {
+			return r.handOff(ctx, project, dir, secrets, out)
+		}); f != nil {
+			r.removeUnlessCurrent(dir)
+			return fail(StepHandOff, f)
+		}
+		res.HandedOff = true
+		return res
 	}
 
 	// From here the running version is replaced: shutting Lighthouse down
@@ -544,6 +575,9 @@ func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (comp
 	}
 	var keys []string
 	for _, v := range vars {
+		if v.Name == DeployCommitVar || v.Name == DeployVersionVar {
+			continue // given by Lighthouse, not a secret
+		}
 		if v.Default != "" {
 			// Only secrets belong in ${...}; a default means it's a setting.
 			fmt.Fprintf(out, "! ${%s} has a default (%q), so it isn't fetched from Cove; write plain settings out as values\n", v.Name, v.Default)
@@ -798,12 +832,18 @@ func (r *run) rollBack(ctx context.Context, res Result, project compose.Project,
 	switch {
 	case len(r.previous) == 0:
 		return note("nothing ran before, so there's nothing to roll back to")
-	case prevSHA == "" || prevDir == "":
+	case (prevSHA == "" || prevDir == "") && r.fallbackDir == "":
 		return note("the previous version's files aren't kept (it wasn't deployed by this Lighthouse), so it wasn't restored automatically")
+	case prevDir == "":
+		prevDir = r.fallbackDir
+	}
+	what := short(prevSHA)
+	if what == "" {
+		what = "the previous images"
 	}
 
 	f := r.step(ctx, "rollback", func(ctx context.Context, out io.Writer) *failure {
-		fmt.Fprintf(out, "restoring %s\n", short(prevSHA))
+		fmt.Fprintf(out, "restoring %s\n", what)
 		for _, s := range project.Services {
 			if s.Build && r.previous[s.Name] != "" {
 				if err := r.d.docker.Tag(ctx, r.previous[s.Name], s.ImageName(project.Name)); err != nil {
@@ -818,6 +858,7 @@ func (r *run) rollBack(ctx context.Context, res Result, project compose.Project,
 				return f
 			}
 		}
+		env = append(append([]string{}, env...), deployVars(prevSHA, r.req.Project.DeployedVersion)...)
 		if err := r.d.compose.Up(ctx, prevDir, project.Name, env, out); err != nil {
 			return permanent(err)
 		}
@@ -831,7 +872,7 @@ func (r *run) rollBack(ctx context.Context, res Result, project compose.Project,
 		os.RemoveAll(failedDir)
 	}
 	res.Status = projects.StatusRolledBack
-	return note("rolled back to " + short(prevSHA))
+	return note("rolled back to " + what)
 }
 
 // fetchSecretsFor fetches the secrets the compose file in dir needs.

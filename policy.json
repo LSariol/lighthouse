@@ -1,3 +1,14 @@
 {
-  "exceptions": []
+  "exceptions": [
+    {
+      "project": "lighthouse",
+      "allow": [
+        "mount:/var/run/docker.sock",
+        "mount:/srv/server/staging",
+        "mount:/srv/server/storage",
+        "mount:/srv/backups"
+      ],
+      "reason": "Lighthouse deploys everything: it drives Docker, keeps the deploy folders and backups, and reads the data folders to check symlinks"
+    }
+  ]
 }

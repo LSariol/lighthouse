@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -97,6 +98,27 @@ func (c *Client) ProjectContainers(ctx context.Context, project string) ([]Conta
 		return containers[i].Name < containers[j].Name
 	})
 	return containers, nil
+}
+
+// SelfProject returns the compose project of the container this process
+// runs in (found by its hostname, which Docker sets to the container's ID),
+// or "" outside Docker.
+func (c *Client) SelfProject(ctx context.Context) (string, error) {
+	if _, err := os.Stat("/.dockerenv"); err != nil {
+		return "", nil // not in a container
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("find Lighthouse's own container: %w", err)
+	}
+	info, err := c.api.ContainerInspect(ctx, host, client.ContainerInspectOptions{})
+	if err != nil {
+		return "", fmt.Errorf("find Lighthouse's own container (hostname %q): %w", host, err)
+	}
+	if info.Container.Config == nil {
+		return "", nil
+	}
+	return info.Container.Config.Labels[projectLabel], nil
 }
 
 // NetworkName is a name a container answers to on a network.

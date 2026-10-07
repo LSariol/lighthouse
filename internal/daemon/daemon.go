@@ -20,6 +20,7 @@ import (
 
 	"github.com/lsariol/lighthouse/internal/config"
 	"github.com/lsariol/lighthouse/internal/control"
+	"github.com/lsariol/lighthouse/internal/deploy"
 	"github.com/lsariol/lighthouse/internal/docker"
 	"github.com/lsariol/lighthouse/internal/github"
 	"github.com/lsariol/lighthouse/internal/orchestrator"
@@ -336,7 +337,7 @@ func (d *Daemon) find(ctx context.Context, name string) (projects.Project, error
 	return p, nil
 }
 
-func (d *Daemon) Deploy(ctx context.Context, name string, version string) error {
+func (d *Daemon) Deploy(ctx context.Context, name string, ref string) error {
 	_, o, err := d.parts()
 	if err != nil {
 		return err
@@ -344,7 +345,23 @@ func (d *Daemon) Deploy(ctx context.Context, name string, version string) error 
 	if _, err := d.find(ctx, name); err != nil {
 		return err
 	}
-	return deployError(name, o.Deploy(ctx, name, version))
+	return deployError(name, o.Deploy(ctx, name, ref))
+}
+
+func (d *Daemon) Rollback(ctx context.Context, name string) (string, error) {
+	_, o, err := d.parts()
+	if err != nil {
+		return "", err
+	}
+	p, err := d.find(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	to, err := o.Rollback(ctx, p.Name)
+	if errors.Is(err, orchestrator.ErrNothingToRollBackTo) {
+		return "", control.Errorf(control.KindNotFound, "%s has no earlier successful deploy to go back to. \"history %s\" lists its deploys; \"deploy %s <tag or commit>\" deploys any one.", p.Name, p.Name, p.Name)
+	}
+	return to, deployError(p.Name, err)
 }
 
 func (d *Daemon) Retry(ctx context.Context, name string) error {
@@ -392,6 +409,9 @@ func (d *Daemon) Check(ctx context.Context, name string) (control.Deployment, er
 func deployError(name string, err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, orchestrator.ErrHandedOff) {
+		return control.Errorf(control.KindHandedOff, "Lighthouse is updating itself: the helper container %s is swapping it now, so this connection ends. \"docker logs -f %s\" shows how it goes; \"history %s\" has the result once Lighthouse is back.", deploy.HelperName, deploy.HelperName, name)
 	}
 	return control.Errorf(control.KindInternal, "Deploying %s failed: %v. \"report %s\" shows each step's output.", name, err, name)
 }

@@ -159,6 +159,8 @@ func TestPolling(t *testing.T) {
 			w.Write([]byte(`[{"name":"v1.2.0","commit":{"sha":"s120"}}]`))
 		case r.URL.Path == "/repos/o/r/tags":
 			w.Write([]byte(`[{"name":"v1.0.0","commit":{"sha":"s100"}}]`))
+		case r.URL.Path == "/repos/o/r/commits/abc1234":
+			w.Write([]byte(`{"sha":"abc1234def"}`))
 		case r.URL.Path == "/repos/o/r/contents/compose.yaml":
 			w.WriteHeader(http.StatusNotFound)
 		case r.URL.Path == "/repos/o/r/contents/compose.yml" && r.URL.Query().Get("ref") == "abc":
@@ -191,6 +193,13 @@ func TestPolling(t *testing.T) {
 	}
 	if _, _, err := c.Tags(ctx, repo, "t", etag); !errors.Is(err, ErrNotModified) {
 		t.Errorf("Tags with the ETag = %v, want ErrNotModified", err)
+	}
+
+	if sha, err := c.ResolveCommit(ctx, repo, "abc1234", "t"); err != nil || sha != "abc1234def" {
+		t.Errorf("ResolveCommit = %q, %v", sha, err)
+	}
+	if _, err := c.ResolveCommit(ctx, repo, "nope", "t"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Errorf("ResolveCommit of an unknown commit = %v", err)
 	}
 
 	name, text, err := c.ComposeFile(ctx, repo, "abc", "t")

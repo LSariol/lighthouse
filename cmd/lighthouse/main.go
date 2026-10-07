@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -62,6 +63,10 @@ func main() {
 		runImport(args[1:])
 	case "version", "--version":
 		fmt.Println(buildVersion(loadConfig()))
+	case "health":
+		os.Exit(runHealth())
+	case "self-update":
+		os.Exit(runSelfUpdate(args[1:]))
 	default:
 		os.Exit(runCommand(args))
 	}
@@ -77,6 +82,8 @@ func printUsage(w io.Writer) {
                                 Show or apply database migrations
   lighthouse import <file|->    Move a pre-1.0 repos.json into the database
   lighthouse version            Print the version
+  lighthouse health             Exit 0 if the daemon answers (the container's healthcheck)
+  lighthouse self-update <file> The update helper's work (Lighthouse starts it itself)
 
 In Docker: docker exec -it lighthouse /lighthouse shell
        or: docker exec lighthouse /lighthouse status
@@ -195,16 +202,27 @@ func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClien
 
 	// The archive download has no overall timeout of its own: the fetch
 	// step's deadline limits it. Commit checks are quick, so 30 seconds.
+	// Lighthouse's own compose project: its deploys hand off to the update
+	// helper. Outside Docker there's none.
+	self, err := dockerClient.SelfProject(ctx)
+	if err != nil {
+		slog.Warn("self-update is off: Lighthouse can't find its own container", "err", err)
+	}
 	deployer := deploy.New(compose.Runner{}, dockerClient, github.Client{}, coveClient, deploy.Options{
+		Self:    self,
 		Root:    cfg.StagingPath,
 		Storage: cfg.StoragePath,
 		Backups: cfg.BackupPath,
 		Policy:  rules,
 		Log:     os.Stderr,
 	})
+	if self != "" {
+		slog.Info("self-update is on", "compose_project", self)
+	}
 	commits := github.Client{HTTP: &http.Client{Timeout: 30 * time.Second}}
 	orch := orchestrator.New(db, commits, deployer, dockerClient, secrets.GitHubToken)
 	d.Ready(db, orch, db)
+	orch.RecordHandOffs(ctx)
 
 	list, _ := db.List(ctx)
 	slog.Info("Lighthouse ready", "projects", len(list), "poll_interval", cfg.PollInterval.String(), "control_socket", cfg.ControlSocket)
@@ -256,6 +274,50 @@ func runShell() {
 
 // runCommand runs one CLI command, e.g. `lighthouse status`, and returns the
 // process exit status: 0 on success, 1 on failure.
+// runHealth is the container's healthcheck: healthy once the daemon answers
+// on its control socket, whatever it's waiting for (Cove, the database).
+func runHealth() int {
+	cfg := loadConfig()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := control.NewClient(cfg.ControlSocket).Status(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lighthouse health: %v\n", err)
+		return 1
+	}
+	fmt.Println(s.Phase)
+	return 0
+}
+
+// runSelfUpdate is the update helper (see internal/deploy/selfupdate.go): it
+// swaps Lighthouse to the version it runs from, waits until it's healthy,
+// and puts the old one back if it isn't.
+func runSelfUpdate(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "Usage: lighthouse self-update <hand-off file>")
+		return 2
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	dockerClient, err := docker.New()
+	if err != nil {
+		fatal(err)
+	}
+	defer dockerClient.Close()
+
+	// The swap and its check aren't cut off: the helper is the only one
+	// that can finish what it started.
+	deployer := deploy.New(compose.Runner{}, dockerClient, nil, nil, deploy.Options{
+		Root: filepath.Dir(filepath.Dir(args[0])),
+		Log:  os.Stderr,
+	})
+	if err := deployer.FinishHandOff(context.Background(), args[0]); err != nil {
+		slog.Error("self-update failed", "err", err)
+		return 1
+	}
+	slog.Info("self-update finished: the new Lighthouse is healthy")
+	return 0
+}
+
 func runCommand(args []string) int {
 	cfg := loadConfig()
 

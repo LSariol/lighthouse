@@ -49,6 +49,11 @@ type Project struct {
 	Mode string
 	Tier string
 
+	// HeldSHA is the branch's newest commit when someone went back to an
+	// older one by hand: checks don't deploy it again (a newer commit, or
+	// `deploy <name>`, does). "" when nothing is held.
+	HeldSHA string
+
 	// Stopped is set by `stop` and cleared by `start` or a deploy: the
 	// reconcile loop leaves a stopped project down, and checks don't deploy it.
 	Stopped bool
@@ -146,6 +151,9 @@ type Store interface {
 	// SetSettings records the project's x-lighthouse settings: its deploy
 	// mode ("branch" or "releases") and tier ("data", "infra" or "app").
 	SetSettings(ctx context.Context, name string, mode string, tier string) error
+
+	// SetHeld records the commit checks mustn't deploy again ("" for none).
+	SetHeld(ctx context.Context, name string, sha string) error
 
 	// SetStopped records whether the project was stopped on purpose.
 	SetStopped(ctx context.Context, name string, stopped bool) error

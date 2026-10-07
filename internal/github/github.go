@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -160,6 +161,23 @@ func (c Client) CheckCommit(ctx context.Context, repo Repo, token string, etag s
 	return commits[0].SHA, resp.Header.Get("ETag"), nil
 }
 
+// ResolveCommit returns the full SHA of a commit given as a full or short
+// SHA (or any ref GitHub understands).
+func (c Client) ResolveCommit(ctx context.Context, repo Repo, ref string, token string) (string, error) {
+	resp, err := c.get(ctx, c.url(repo, "/commits/"+url.PathEscape(ref)), token, "application/vnd.github+json", "")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var commit struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&commit); err != nil || commit.SHA == "" {
+		return "", &Error{Status: resp.StatusCode, Err: fmt.Errorf("unexpected answer for commit %q: %v", ref, err)}
+	}
+	return commit.SHA, nil
+}
+
 // Archive returns the repository's files at commit sha, as a gzipped tarball
 // whose entries all sit in one top-level folder. The caller closes it. It
 // works for private repositories the token can read.
@@ -184,19 +202,19 @@ const maxTagPages = 10
 // (annotated tags included). Given the ETag of the last answer, it returns
 // ErrNotModified if the first page hasn't changed.
 func (c Client) Tags(ctx context.Context, repo Repo, token string, etag string) ([]Tag, string, error) {
-	url := c.url(repo, "/tags?per_page=100")
+	page := c.url(repo, "/tags?per_page=100")
 	var tags []Tag
 	newETag := ""
-	for page := 0; page < maxTagPages && url != ""; page++ {
+	for n := 0; n < maxTagPages && page != ""; n++ {
 		pageETag := ""
-		if page == 0 {
+		if n == 0 {
 			pageETag = etag
 		}
-		resp, err := c.get(ctx, url, token, "application/vnd.github+json", pageETag)
+		resp, err := c.get(ctx, page, token, "application/vnd.github+json", pageETag)
 		if err != nil {
 			return nil, "", err
 		}
-		if page == 0 {
+		if n == 0 {
 			newETag = resp.Header.Get("ETag")
 		}
 		var list []struct {
@@ -213,7 +231,7 @@ func (c Client) Tags(ctx context.Context, repo Repo, token string, etag string) 
 		for _, t := range list {
 			tags = append(tags, Tag{Name: t.Name, SHA: t.Commit.SHA})
 		}
-		url = nextPage(resp.Header.Get("Link"))
+		page = nextPage(resp.Header.Get("Link"))
 	}
 	return tags, newETag, nil
 }

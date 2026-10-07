@@ -48,13 +48,13 @@ func constraintError(err error) error {
 
 const projectColumns = `name, repo_owner, repo_name, created_at, coalesce(compose_project, ''),
 	coalesce(deployed_sha, ''), coalesce(deployed_version, ''), coalesce(highest_version, ''), deployed_at, last_checked_at, check_count, coalesce(last_error, ''), last_error_at,
-	failure_count, coalesce(failing_sha, ''), broken, deploy_mode, tier, stopped`
+	failure_count, coalesce(failing_sha, ''), broken, deploy_mode, tier, stopped, coalesce(held_sha, '')`
 
 func scanProject(row pgx.Row) (projects.Project, error) {
 	var p projects.Project
 	err := row.Scan(&p.Name, &p.Repo.Owner, &p.Repo.Name, &p.CreatedAt, &p.ComposeProject,
 		&p.DeployedSHA, &p.DeployedVersion, &p.HighestVersion, &p.DeployedAt, &p.LastCheckedAt, &p.Checks, &p.LastError, &p.LastErrorAt,
-		&p.FailureCount, &p.FailingSHA, &p.Broken, &p.Mode, &p.Tier, &p.Stopped)
+		&p.FailureCount, &p.FailingSHA, &p.Broken, &p.Mode, &p.Tier, &p.Stopped, &p.HeldSHA)
 	return p, err
 }
 
@@ -136,6 +136,10 @@ func (d *Database) SetComposeProject(ctx context.Context, name string, composePr
 
 func (d *Database) SetSettings(ctx context.Context, name string, mode string, tier string) error {
 	return d.exec(ctx, `UPDATE lighthouse.projects SET deploy_mode = $2, tier = $3 WHERE lower(name) = lower($1)`, name, mode, tier)
+}
+
+func (d *Database) SetHeld(ctx context.Context, name string, sha string) error {
+	return d.exec(ctx, `UPDATE lighthouse.projects SET held_sha = nullif($2, '') WHERE lower(name) = lower($1)`, name, sha)
 }
 
 func (d *Database) SetStopped(ctx context.Context, name string, stopped bool) error {

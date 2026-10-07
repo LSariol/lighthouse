@@ -76,12 +76,16 @@ func Handler(svc Service) http.Handler {
 
 	mux.HandleFunc("POST /v1/projects/{name}/deploy", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Version string `json:"version"`
+			Ref string `json:"ref"`
 		}
 		if !decode(w, r, &body) {
 			return
 		}
-		respond(w, nil, svc.Deploy(r.Context(), r.PathValue("name"), body.Version))
+		respond(w, nil, svc.Deploy(r.Context(), r.PathValue("name"), body.Ref))
+	})
+	mux.HandleFunc("POST /v1/projects/{name}/rollback", func(w http.ResponseWriter, r *http.Request) {
+		to, err := svc.Rollback(r.Context(), r.PathValue("name"))
+		respond(w, to, err)
 	})
 	mux.HandleFunc("POST /v1/projects/{name}/check", func(w http.ResponseWriter, r *http.Request) {
 		result, err := svc.Check(r.Context(), r.PathValue("name"))
@@ -131,6 +135,7 @@ var statusFor = map[string]int{
 	KindNotFound:    http.StatusNotFound,
 	KindConflict:    http.StatusConflict,
 	KindNameTaken:   http.StatusConflict,
+	KindHandedOff:   http.StatusAccepted,
 	KindUnavailable: http.StatusServiceUnavailable,
 	KindInternal:    http.StatusInternalServerError,
 }

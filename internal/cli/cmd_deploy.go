@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,7 +12,7 @@ import (
 )
 
 func (c *CLI) deploy(ctx context.Context, args []string) error {
-	const form = "deploy <name> [version] | deploy all [--yes]"
+	const form = "deploy <name> [tag|commit] | deploy all [--yes]"
 	skip, rest := takeYesFlag(args[1:])
 	if len(rest) < 1 || len(rest) > 2 || len(rest) == 2 && strings.EqualFold(rest[0], "all") {
 		return usageError{form: form}
@@ -30,10 +31,23 @@ func (c *CLI) deploy(ctx context.Context, args []string) error {
 		version = rest[1]
 	}
 	if err := c.deployVersion(ctx, rest[0], version); err != nil {
+		if handedOff(err) {
+			return nil
+		}
 		return err
 	}
 	success(fmt.Sprintf("Deployed %q.", rest[0]))
 	return nil
+}
+
+// handedOff shows a self-update's hand-off as the success it is.
+func handedOff(err error) bool {
+	var ce *control.Error
+	if errors.As(err, &ce) && ce.Kind == control.KindHandedOff {
+		success(ce.Message)
+		return true
+	}
+	return false
 }
 
 func (c *CLI) deployOne(ctx context.Context, name string) error {
@@ -47,6 +61,19 @@ func (c *CLI) deployVersion(ctx context.Context, name string, version string) er
 	}
 	info(fmt.Sprintf("Deploying %s. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", what))
 	return c.svc.Deploy(ctx, name, version)
+}
+
+func (c *CLI) rollback(ctx context.Context, args []string) error {
+	if len(args) != 2 {
+		return usageError{form: "rollback <name>"}
+	}
+	info(fmt.Sprintf("Rolling %q back to what ran before. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", args[1]))
+	to, err := c.svc.Rollback(ctx, args[1])
+	if err != nil {
+		return err
+	}
+	success(fmt.Sprintf("Rolled %q back to %s. Checks won't deploy what it went back from; a newer commit or release will, and so will \"deploy %s\".", args[1], to, args[1]))
+	return nil
 }
 
 func (c *CLI) retry(ctx context.Context, args []string) error {

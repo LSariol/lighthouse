@@ -228,6 +228,47 @@ func (r Runner) Exec(ctx context.Context, container string, command []string, st
 	return nil
 }
 
+// RunDetached starts a container in the background: docker run -d --name
+// name -v volume... image command... (e.g. the self-update helper).
+func (r Runner) RunDetached(ctx context.Context, name string, image string, volumes []string, command []string) error {
+	args := []string{"run", "-d", "--name", name}
+	for _, v := range volumes {
+		args = append(args, "-v", v)
+	}
+	args = append(args, "--entrypoint", command[0], image)
+	args = append(args, command[1:]...)
+	return r.docker(ctx, args...)
+}
+
+// RemoveContainer removes a container, running or not; one that doesn't
+// exist is fine.
+func (r Runner) RemoveContainer(ctx context.Context, name string) error {
+	err := r.docker(ctx, "rm", "-f", name)
+	if err != nil && strings.Contains(err.Error(), "No such container") {
+		return nil
+	}
+	return err
+}
+
+// docker runs a docker command (not compose), with the base environment.
+func (r Runner) docker(ctx context.Context, args ...string) error {
+	bin := r.Docker
+	if bin == "" {
+		bin = "docker"
+	}
+	var out tailBuffer
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = BaseEnv()
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("docker %s: %w", args[0], ctx.Err())
+		}
+		return fmt.Errorf("docker %s failed (%v): %s", args[0], err, out.lastLines(3))
+	}
+	return nil
+}
+
 // Up starts the project from images already built, replacing its running
 // containers, and removes containers of services it no longer has.
 func (r Runner) Up(ctx context.Context, dir string, project string, env []string, out io.Writer) error {

@@ -163,21 +163,34 @@ func commandTable(embedded bool) []command {
 		{
 			names:    []string{"deploy", "rebuild"},
 			group:    groupDeploying,
-			synopsis: "<name|all> [version]",
+			synopsis: "<name|all> [tag|commit]",
 			summary:  "Deploy the latest commit or release now",
 			usages: []usage{
 				{"deploy <name>", "Build and start a project's latest commit (or, for a project that deploys releases, its newest release) now, even if it's already deployed or broken. The running version keeps serving until the new one is built; if the new one doesn't come up, the old one is put back. Waits until it's done. A stopped project is started again."},
-				{"deploy <name> <version>", "Deploy a tag, such as an older release to go back to. Automatic deploys never go back to an older release by themselves."},
+				{"deploy <name> <tag|commit>", "Deploy a tag or a commit (its full or short SHA), such as an older one to go back to. Checks won't redeploy what you went back from; a newer commit or release, or \"deploy <name>\", will."},
 				{"deploy all", "Deploy every project, one after another. Asks first."},
 			},
 			flags: []flag{{"--yes, -y", "deploy all: don't ask for confirmation."}},
 			examples: []example{
 				{"deploy plop", "redeploy after changing one of its secrets"},
 				{"deploy cove v1.0.0", "go back to Cove v1.0.0"},
+				{"deploy plop 3f2a9c1", "go back to an older commit"},
 				{"deploy all --yes", "everything, no question"},
 			},
 			run:      (*CLI).deploy,
 			complete: namesOrAll,
+		},
+		{
+			names:    []string{"rollback"},
+			group:    groupDeploying,
+			synopsis: "<name>",
+			summary:  "Go back to what ran before",
+			usages: []usage{
+				{"rollback <name>", "Deploy the version that ran before the current one (the newest earlier successful deploy), for a version that came up healthy but turned out wrong. Usually quick: its image and files are kept. Checks won't redeploy what you went back from; a newer commit or release, or \"deploy <name>\", will."},
+			},
+			examples: []example{{"rollback plop", "the last deploy broke something"}},
+			run:      (*CLI).rollback,
+			complete: names,
 		},
 		{
 			names:    []string{"retry"},

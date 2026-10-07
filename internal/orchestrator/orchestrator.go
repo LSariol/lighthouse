@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -33,12 +34,19 @@ import (
 	"github.com/lsariol/lighthouse/internal/settings"
 )
 
-// Deployer deploys a project, or checks it without deploying.
-// *deploy.Deployer implements it.
+// Deployer deploys a project, or checks it without deploying, and keeps
+// Lighthouse's own updates (hand-offs). *deploy.Deployer implements it.
 type Deployer interface {
 	Deploy(ctx context.Context, req deploy.Request) deploy.Result
 	Check(ctx context.Context, req deploy.Request) deploy.Result
+	HandOffs() ([]deploy.HandOff, error)
+	Forget(h deploy.HandOff) error
 }
+
+// ErrHandedOff means the deploy was Lighthouse's own: the update helper is
+// replacing this Lighthouse now, and the result is recorded by the one that
+// runs afterwards.
+var ErrHandedOff = errors.New("handed off to the update helper")
 
 // GitHub answers what's new in a repository. github.Client implements it.
 type GitHub interface {
@@ -46,6 +54,7 @@ type GitHub interface {
 	CheckCommit(ctx context.Context, repo github.Repo, token string, etag string) (string, string, error)
 	Tags(ctx context.Context, repo github.Repo, token string, etag string) ([]github.Tag, string, error)
 	ComposeFile(ctx context.Context, repo github.Repo, sha string, token string) (string, []byte, error)
+	ResolveCommit(ctx context.Context, repo github.Repo, ref string, token string) (string, error)
 }
 
 // Containers tells the reconcile loop what's running. *docker.Client
@@ -167,6 +176,8 @@ func (o *Orchestrator) Scan(ctx context.Context) error {
 	}
 	defer o.scanning.Unlock()
 
+	o.RecordHandOffs(ctx)
+
 	list, err := o.store.List(ctx)
 	if err != nil {
 		return err
@@ -254,7 +265,8 @@ func (o *Orchestrator) latest(ctx context.Context, p *projects.Project, w *watch
 	}
 
 	if p.Mode != settings.DeployReleases {
-		if sha == p.DeployedSHA && p.DeployedVersion == "" {
+		if sha == p.DeployedSHA && p.DeployedVersion == "" || sha == p.HeldSHA {
+			// Deployed already, or what someone went back from by hand.
 			return target{}, false, nil
 		}
 		return target{sha: sha}, true, nil
@@ -353,31 +365,92 @@ func (o *Orchestrator) record(ctx context.Context, name string, err error, setEr
 }
 
 // Deploy deploys the project called name now, even if it's what's deployed
-// or what broke it: the given version (a tag), or else its newest release
-// (release mode) or the newest commit on its branch. A stopped project is
-// started again.
-func (o *Orchestrator) Deploy(ctx context.Context, name string, version string) error {
+// or what broke it: ref (a tag, or a commit's full or short SHA), or else its
+// newest release (release mode) or the newest commit on its branch. A
+// stopped project is started again. Going back to an older commit holds the
+// branch's newest one: checks don't redeploy it until a newer commit comes,
+// or `deploy <name>`.
+func (o *Orchestrator) Deploy(ctx context.Context, name string, ref string) error {
 	p, err := o.store.Get(ctx, name)
 	if err != nil {
 		return err
 	}
-	t, err := o.manualTarget(ctx, p, version)
+	t, err := o.manualTarget(ctx, p, ref)
 	if err != nil {
 		return err
 	}
+	return o.deployByHand(ctx, p, t, ref == "")
+}
+
+// deployByHand deploys t for `deploy` or `rollback`. latest says t is the
+// newest commit or release, which ends any hold.
+func (o *Orchestrator) deployByHand(ctx context.Context, p projects.Project, t target, latest bool) error {
 	if p.Stopped {
 		if err := o.store.SetStopped(ctx, p.Name, false); err != nil {
-			return err
+			return fmt.Errorf("record that %s is no longer stopped: %w", p.Name, err)
 		}
+	}
+	if err := o.hold(ctx, p, t, latest); err != nil {
+		return err
 	}
 	w := o.watchOf(p.Name)
 	w.backoff, w.nextAttempt = 0, time.Time{}
 	return o.deploy(ctx, p, t, projects.TriggerManual)
 }
 
-// manualTarget is what `deploy` and `check` act on.
-func (o *Orchestrator) manualTarget(ctx context.Context, p projects.Project, version string) (target, error) {
-	if version == "" && p.Mode != settings.DeployReleases {
+// hold records what a project that deploys its branch went back from, so
+// checks don't deploy it again. (Release mode needs none: checks only deploy
+// a release newer than any deployed before.)
+func (o *Orchestrator) hold(ctx context.Context, p projects.Project, t target, latest bool) error {
+	held := ""
+	if !latest && p.Mode != settings.DeployReleases {
+		head, err := o.github.LatestCommit(ctx, p.Repo, o.gitToken)
+		if err != nil {
+			return err
+		}
+		if head != t.sha {
+			held = head
+		}
+	}
+	if held == p.HeldSHA {
+		return nil
+	}
+	if err := o.store.SetHeld(ctx, p.Name, held); err != nil {
+		return fmt.Errorf("record the commit %s went back from: %w", p.Name, err)
+	}
+	if held != "" {
+		slog.Info("holding a commit: checks won't deploy it again", "project", p.Name, "sha", short(held))
+	}
+	return nil
+}
+
+// Rollback deploys again what ran before the current version: the newest
+// successful deploy of something else. It returns what that is.
+func (o *Orchestrator) Rollback(ctx context.Context, name string) (string, error) {
+	p, err := o.store.Get(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	history, err := o.store.History(ctx, p.Name, 200)
+	if err != nil {
+		return "", fmt.Errorf("read %s's history: %w", p.Name, err)
+	}
+	for _, d := range history {
+		if d.Status == projects.StatusSucceeded && d.SHA != "" && d.SHA != p.DeployedSHA {
+			t := target{sha: d.SHA, version: d.Version}
+			return t.String(), o.deployByHand(ctx, p, t, false)
+		}
+	}
+	return "", ErrNothingToRollBackTo
+}
+
+// ErrNothingToRollBackTo means a project has no earlier successful deploy.
+var ErrNothingToRollBackTo = errors.New("no earlier successful deploy to go back to")
+
+// manualTarget is what `deploy` and `check` act on: ref (a tag or a commit),
+// or the newest release or commit.
+func (o *Orchestrator) manualTarget(ctx context.Context, p projects.Project, ref string) (target, error) {
+	if ref == "" && p.Mode != settings.DeployReleases {
 		sha, err := o.github.LatestCommit(ctx, p.Repo, o.gitToken)
 		return target{sha: sha}, err
 	}
@@ -385,19 +458,29 @@ func (o *Orchestrator) manualTarget(ctx context.Context, p projects.Project, ver
 	if err != nil {
 		return target{}, err
 	}
-	if version == "" {
+	if ref == "" {
 		newest, _, found := release.Newest(tags)
 		if !found {
 			return target{}, fmt.Errorf("%s has no releases yet (tags such as v1.0.0)", p.Repo)
 		}
 		return target{sha: newest.SHA, version: newest.Name}, nil
 	}
-	tag, found := release.Find(tags, version)
-	if !found {
-		return target{}, fmt.Errorf("%s has no tag %q", p.Repo, version)
+	if tag, found := release.Find(tags, ref); found {
+		return target{sha: tag.SHA, version: tag.Name}, nil
 	}
-	return target{sha: tag.SHA, version: tag.Name}, nil
+	if !commitRef.MatchString(ref) {
+		return target{}, fmt.Errorf("%s has no tag %q (a commit is 7 to 40 hex characters)", p.Repo, ref)
+	}
+	sha, err := o.github.ResolveCommit(ctx, p.Repo, ref, o.gitToken)
+	var gh *github.Error
+	if errors.As(err, &gh) && (gh.Status == 404 || gh.Status == 422) {
+		return target{}, fmt.Errorf("%s has no tag or commit %q", p.Repo, ref)
+	}
+	return target{sha: sha}, err
 }
+
+// commitRef is a commit's full or short SHA.
+var commitRef = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 
 // Check runs the project's newest commit (or release) through the deploy's
 // checks (fetch, inspect, the rules, the test stage) without deploying or
@@ -441,12 +524,35 @@ func (o *Orchestrator) Retry(ctx context.Context, name string) error {
 	return o.Deploy(ctx, name, "")
 }
 
+// RecordHandOffs records Lighthouse's own updates once the helper has
+// finished them (or given up), as any deploy is recorded.
+func (o *Orchestrator) RecordHandOffs(ctx context.Context) {
+	handOffs, err := o.deployer.HandOffs()
+	if err != nil {
+		slog.Error("self-update results can't be read", "err", err)
+		return
+	}
+	for _, h := range handOffs {
+		d := h.Deployment()
+		slog.Info("self-update finished", "project", d.Project, "sha", short(d.SHA), "status", d.Status, "err", d.Error)
+		o.recordDeployment(ctx, d)
+		if err := o.deployer.Forget(h); err != nil {
+			slog.Error("a recorded self-update can't be removed; it may be recorded twice", "err", err)
+		}
+	}
+}
+
 // deploy waits for its turn, runs one deployment of p and records it.
 func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target, trigger string) error {
 	if err := o.turn.acquire(ctx, settings.Settings{Tier: p.Tier}.Order()); err != nil {
 		return err
 	}
-	defer o.turn.release()
+	release := true
+	defer func() {
+		if release {
+			o.turn.release()
+		}
+	}()
 
 	// What's queued may be stale: the project may have been removed or
 	// changed while it waited.
@@ -461,6 +567,7 @@ func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target,
 		Project: p,
 		SHA:     t.sha,
 		Version: t.version,
+		Trigger: trigger,
 		Token:   o.gitToken,
 		Claim: func(ctx context.Context, composeProject string) error {
 			err := o.store.SetComposeProject(ctx, p.Name, composeProject)
@@ -470,6 +577,15 @@ func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target,
 			return err
 		},
 	})
+
+	if res.HandedOff {
+		// This Lighthouse is about to be replaced: it keeps the turn, so
+		// nothing else starts, and stops checking.
+		release = false
+		o.Pause()
+		slog.Info("self-update handed off: the helper replaces this Lighthouse now", "sha", short(t.sha), "helper", deploy.HelperName)
+		return ErrHandedOff
+	}
 
 	d := projects.Deployment{
 		Project:     p.Name,

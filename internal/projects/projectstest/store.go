@@ -161,6 +161,17 @@ func (s *Store) SetSettings(ctx context.Context, name string, mode string, tier 
 	return nil
 }
 
+func (s *Store) SetHeld(ctx context.Context, name string, sha string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.index(name)
+	if i < 0 {
+		return projects.ErrNotFound
+	}
+	s.projects[i].HeldSHA = sha
+	return nil
+}
+
 func (s *Store) SetStopped(ctx context.Context, name string, stopped bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

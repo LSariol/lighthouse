@@ -91,6 +91,21 @@ func (g *fakeGitHub) Tags(ctx context.Context, r github.Repo, token string, etag
 	return append([]github.Tag(nil), rp.tags...), tag, nil
 }
 
+func (g *fakeGitHub) ResolveCommit(ctx context.Context, r github.Repo, ref string, token string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, err := g.repo(r, token); err != nil {
+		return "", err
+	}
+	// The commits the tests know, by their short SHAs.
+	for _, sha := range []string{"aaa1111bbb", "old0000ccc"} {
+		if strings.HasPrefix(sha, ref) {
+			return sha, nil
+		}
+	}
+	return "", &github.Error{Status: 404, Err: errors.New("404 Not Found")}
+}
+
 func (g *fakeGitHub) ComposeFile(ctx context.Context, r github.Repo, sha string, token string) (string, []byte, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -117,6 +132,8 @@ type fakeDeployer struct {
 	deployed []string // "name@sha", or "name@version" for a release
 	checked  []string
 	result   func(req deploy.Request) deploy.Result
+	handOffs []deploy.HandOff
+	forgot   int
 }
 
 func (f *fakeDeployer) Deploy(ctx context.Context, req deploy.Request) deploy.Result {
@@ -151,6 +168,20 @@ func (f *fakeDeployer) Check(ctx context.Context, req deploy.Request) deploy.Res
 		}
 	}
 	return deploy.Result{Status: projects.StatusSucceeded}
+}
+
+func (f *fakeDeployer) HandOffs() ([]deploy.HandOff, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.handOffs, nil
+}
+
+func (f *fakeDeployer) Forget(h deploy.HandOff) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.handOffs = nil
+	f.forgot++
+	return nil
 }
 
 func (f *fakeDeployer) count() int {
@@ -524,6 +555,99 @@ func waitFor(t *testing.T, tr *turn, waiting int) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("never %d waiting", waiting)
+}
+
+func TestRollbackOnTheBranch(t *testing.T) {
+	gh := newGitHub(map[string]string{"site": "old0000ccc"})
+	o, store, d, _ := setup(t, gh, "site")
+	ctx := context.Background()
+	o.Scan(ctx)
+	gh.repos["site"].head = "aaa1111bbb"
+	o.Scan(ctx)
+
+	// Back to what ran before; the newest commit is held.
+	back, err := o.Rollback(ctx, "site")
+	if err != nil || back != "old0000" || get(t, store, "site").DeployedSHA != "old0000ccc" {
+		t.Fatalf("Rollback = %q, %v; deployed %s", back, err, get(t, store, "site").DeployedSHA)
+	}
+	if p := get(t, store, "site"); p.HeldSHA != "aaa1111bbb" {
+		t.Errorf("held %q", p.HeldSHA)
+	}
+	o.Scan(ctx)
+	if d.list() != "site@old0000ccc,site@aaa1111bbb,site@old0000ccc" {
+		t.Errorf("the held commit was redeployed: %s", d.list())
+	}
+
+	// A newer commit deploys as usual.
+	gh.repos["site"].head = "new"
+	o.Scan(ctx)
+	if !strings.HasSuffix(d.list(), "site@new") {
+		t.Errorf("deployed %s", d.list())
+	}
+
+	// deploy <name> <short commit>, and deploy <name> ends the hold.
+	if err := o.Deploy(ctx, "site", "aaa1111"); err != nil || !strings.HasSuffix(d.list(), "site@aaa1111bbb") {
+		t.Errorf("deploy of a short SHA: %v, %s", err, d.list())
+	}
+	if p := get(t, store, "site"); p.HeldSHA != "new" {
+		t.Errorf("held %q, want the head it went back from", p.HeldSHA)
+	}
+	if err := o.Deploy(ctx, "site", ""); err != nil || get(t, store, "site").HeldSHA != "" {
+		t.Errorf("deploy <name>: %v, held %q", err, get(t, store, "site").HeldSHA)
+	}
+	if err := o.Deploy(ctx, "site", "fffffff"); err == nil || !strings.Contains(err.Error(), `no tag or commit "fffffff"`) {
+		t.Errorf("an unknown commit = %v", err)
+	}
+	if err := o.Deploy(ctx, "site", "not-a-tag"); err == nil || !strings.Contains(err.Error(), `no tag "not-a-tag"`) {
+		t.Errorf("an unknown tag = %v", err)
+	}
+
+	// Nothing earlier to go back to.
+	o2, _, _, _ := setup(t, newGitHub(map[string]string{"x": "aaa"}), "x")
+	o2.Scan(ctx)
+	if _, err := o2.Rollback(ctx, "x"); !errors.Is(err, ErrNothingToRollBackTo) {
+		t.Errorf("Rollback with one deploy = %v", err)
+	}
+}
+
+func TestSelfUpdate(t *testing.T) {
+	o, store, d, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new", "app": "a1"}), "app", "lighthouse")
+	ctx := context.Background()
+	d.result = func(req deploy.Request) deploy.Result {
+		if req.Project.Name == "lighthouse" {
+			return deploy.Result{HandedOff: true}
+		}
+		return deploy.Result{Status: projects.StatusSucceeded}
+	}
+
+	// The hand-off: nothing recorded, checks stop, and the turn is kept so
+	// nothing else deploys before this Lighthouse is replaced.
+	if err := o.Deploy(ctx, "lighthouse", ""); !errors.Is(err, ErrHandedOff) {
+		t.Fatalf("Deploy = %v, want ErrHandedOff", err)
+	}
+	if h, _ := store.History(ctx, "lighthouse", 10); len(h) != 0 || !o.IsPaused() {
+		t.Errorf("history %v, paused %v", h, o.IsPaused())
+	}
+	cctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := o.Deploy(cctx, "app", ""); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a deploy after the hand-off = %v, want it to wait", err)
+	}
+
+	// The next Lighthouse records how it went.
+	o2, _, d2, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new"}))
+	o2.store = store
+	now := time.Now()
+	d2.handOffs = []deploy.HandOff{{Project: projects.Project{Name: "lighthouse"}, SHA: "new", Trigger: projects.TriggerManual,
+		Done: true, Status: projects.StatusSucceeded, StartedAt: now, FinishedAt: now,
+		Steps: []projects.Step{{Name: "swap", Status: projects.StepSucceeded}}}}
+	o2.RecordHandOffs(ctx)
+	if p := get(t, store, "lighthouse"); p.DeployedSHA != "new" || d2.forgot != 1 {
+		t.Errorf("after recording: deployed %q, forgot %d", p.DeployedSHA, d2.forgot)
+	}
+	if dep, _ := store.Deployment(ctx, "lighthouse", 1); dep.Trigger != projects.TriggerManual || len(dep.Steps) != 1 {
+		t.Errorf("recorded %+v", dep)
+	}
 }
 
 func TestStoppedProjectsAreLeftAlone(t *testing.T) {

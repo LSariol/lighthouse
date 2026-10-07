@@ -77,6 +77,9 @@ func (f *fakeService) Check(ctx context.Context, name string) (control.Deploymen
 	return d, nil
 }
 func (f *fakeService) Retry(ctx context.Context, name string) error { return f.act("retry", name) }
+func (f *fakeService) Rollback(ctx context.Context, name string) (string, error) {
+	return "v1.0.0 (abc1234)", f.act("rollback", name)
+}
 func (f *fakeService) Report(ctx context.Context, name string, n int) (control.Deployment, error) {
 	start := time.Now().Add(-time.Hour)
 	return control.Deployment{Commit: "abcdef123", Trigger: "check", Status: "rolled_back", FailureKind: "permanent", FailedStep: "verify",
@@ -208,6 +211,14 @@ func TestDeployVersion(t *testing.T) {
 	var usage usageError
 	if _, _, err := run(t, newFake("cove"), "deploy all v1.0.0 --yes"); !errors.As(err, &usage) {
 		t.Errorf("deploy all with a version = %v, want a usage error", err)
+	}
+}
+
+func TestRollback(t *testing.T) {
+	svc := newFake("cove")
+	_, errOut, err := run(t, svc, "rollback cove")
+	if err != nil || svc.calls[0] != "rollback cove" || !strings.Contains(errOut, `Rolled "cove" back to v1.0.0 (abc1234)`) {
+		t.Errorf("rollback: %v, calls %v\n%s", err, svc.calls, errOut)
 	}
 }
 

@@ -276,21 +276,21 @@ func (c *checker) namespace(service string, field string, value string) {
 }
 
 // hostMount allows a bind mount from the repository's files or the project's
-// data folder.
+// data folder. Paths in findings use forward slashes, as policy.json does.
 func (c *checker) hostMount(service string, source string, readOnly bool) {
 	ok, link := c.inside(source)
-	path := filepath.Clean(source)
+	path := filepath.ToSlash(filepath.Clean(source))
 	switch {
 	case ok:
 		return
 	case link != "":
-		c.add(service, "link:"+path, "mounts %s, a symlink to %s: outside the project's folders", path, link)
+		c.add(service, "link:"+path, "mounts %s, a symlink to %s: outside the project's folders", path, filepath.ToSlash(link))
 		return
-	case readOnly && readOnlyHostFiles[filepath.ToSlash(path)]:
+	case readOnly && readOnlyHostFiles[path]:
 		return
 	}
 	switch {
-	case strings.HasSuffix(filepath.ToSlash(path), "/docker.sock"):
+	case strings.HasSuffix(path, "/docker.sock"):
 		c.add(service, "mount:"+path, "mounts the Docker socket, which controls every container on the server (root on the host)")
 	default:
 		c.add(service, "mount:"+path, "mounts %s from the host; data belongs in %s", path, c.storageHint())
@@ -301,11 +301,11 @@ func (c *checker) hostMount(service string, source string, readOnly bool) {
 // project's data folder.
 func (c *checker) file(service string, what string, source string) {
 	ok, link := c.inside(source)
-	path := filepath.Clean(source)
+	path := filepath.ToSlash(filepath.Clean(source))
 	switch {
 	case ok:
 	case link != "":
-		c.add(service, "link:"+path, "%s %s is a symlink to %s: outside the project's folders", what, path, link)
+		c.add(service, "link:"+path, "%s %s is a symlink to %s: outside the project's folders", what, path, filepath.ToSlash(link))
 	default:
 		c.add(service, "file:"+path, "%s %s is outside the repository and the project's data folder", what, path)
 	}

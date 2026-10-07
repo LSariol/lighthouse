@@ -28,9 +28,13 @@ type Service interface {
 	Rename(ctx context.Context, name string, newName string) error
 	SetURL(ctx context.Context, name string, url string) error
 
-	// Deploy deploys a project now: the given version (a tag), or else its
-	// newest release (release mode) or its branch's newest commit.
-	Deploy(ctx context.Context, name string, version string) error
+	// Deploy deploys a project now: ref (a tag, or a commit's full or short
+	// SHA), or else its newest release (release mode) or its branch's newest
+	// commit.
+	Deploy(ctx context.Context, name string, ref string) error
+	// Rollback deploys again what ran before the current version, and says
+	// what that was ("v1.1.0 (abc1234)" or "abc1234").
+	Rollback(ctx context.Context, name string) (string, error)
 	// Check runs the project's latest commit through the deploy's checks
 	// (the rules and the test stage) without deploying it. The result, with
 	// its steps, isn't recorded in the history.
@@ -130,6 +134,7 @@ const (
 	KindConflict    = "conflict"    // a URL already watched, a scan already running
 	KindNameTaken   = "name_taken"  // `add`: a project already has that name; pick another
 	KindUnavailable = "unavailable" // the daemon isn't ready (still starting)
+	KindHandedOff   = "handed_off"  // Lighthouse's own deploy: the update helper is replacing it (not a failure)
 	KindInternal    = "internal"    // anything else; details are in docker logs
 )
 

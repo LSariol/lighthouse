@@ -96,6 +96,8 @@ type fakeCompose struct {
 	stageErr error
 
 	stages  []string // Dockerfiles whose test stage was built
+	helpers []string // containers started with RunDetached
+	runErr  error
 	execs   []string // containers commands ran in
 	dump    string   // what Exec writes (a database dump)
 	execErr error
@@ -135,6 +137,15 @@ func (f *fakeCompose) Exec(ctx context.Context, container string, command []stri
 	io.WriteString(stdout, f.dump)
 	return f.execErr
 }
+
+func (f *fakeCompose) RunDetached(ctx context.Context, name string, image string, volumes []string, command []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.helpers = append(f.helpers, name+" "+image+" "+strings.Join(command, " "))
+	return f.runErr
+}
+
+func (f *fakeCompose) RemoveContainer(ctx context.Context, name string) error { return nil }
 
 func (f *fakeCompose) BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error {
 	f.mu.Lock()

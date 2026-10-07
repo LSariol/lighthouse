@@ -65,10 +65,16 @@ func (fakeDeployer) Check(ctx context.Context, req deploy.Request) deploy.Result
 		Steps: []projects.Step{{Name: deploy.StepCheck, Status: projects.StepFailed, Log: "✗ web: privileged: true"}}}
 }
 
+func (fakeDeployer) HandOffs() ([]deploy.HandOff, error) { return nil, nil }
+func (fakeDeployer) Forget(deploy.HandOff) error         { return nil }
+
 type fakeCommits struct{}
 
 func (fakeCommits) CheckCommit(ctx context.Context, repo github.Repo, token string, etag string) (string, string, error) {
 	return "abc", "", nil
+}
+func (fakeCommits) ResolveCommit(ctx context.Context, repo github.Repo, ref string, token string) (string, error) {
+	return ref, nil
 }
 func (fakeCommits) Tags(ctx context.Context, repo github.Repo, token string, etag string) ([]github.Tag, string, error) {
 	return nil, "", nil
@@ -270,12 +276,13 @@ func TestBeforeReady(t *testing.T) {
 		t.Errorf("Status = %+v, %v", status, err)
 	}
 	for name, err := range map[string]error{
-		"deploy": d.Deploy(ctx, "plop", ""),
-		"retry":  d.Retry(ctx, "plop"),
-		"scan":   d.Scan(ctx),
-		"pause":  d.Pause(ctx),
-		"remove": d.Remove(ctx, "plop", false),
-		"stop":   d.Stop(ctx, "plop"),
+		"deploy":   d.Deploy(ctx, "plop", ""),
+		"rollback": func() error { _, err := d.Rollback(ctx, "plop"); return err }(),
+		"retry":    d.Retry(ctx, "plop"),
+		"scan":     d.Scan(ctx),
+		"pause":    d.Pause(ctx),
+		"remove":   d.Remove(ctx, "plop", false),
+		"stop":     d.Stop(ctx, "plop"),
 	} {
 		if kind(err) != control.KindUnavailable || !strings.Contains(err.Error(), PhaseDatabase) {
 			t.Errorf("%s before Ready = %v, want unavailable naming the phase", name, err)

@@ -209,6 +209,19 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 		if p.Mode != "releases" || p.Tier != "infra" || !p.Stopped {
 			t.Errorf("after SetSettings and SetStopped: %+v", p)
 		}
+		if err := s.SetHeld(ctx, "cove", "fff"); err != nil {
+			t.Fatal(err)
+		}
+		if p, _ = s.Get(ctx, "cove"); p.HeldSHA != "fff" {
+			t.Errorf("held %q", p.HeldSHA)
+		}
+		s.SetHeld(ctx, "cove", "")
+		if p, _ = s.Get(ctx, "cove"); p.HeldSHA != "" {
+			t.Errorf("held %q after clearing", p.HeldSHA)
+		}
+		if err := s.SetHeld(ctx, "gone", "x"); !errors.Is(err, projects.ErrNotFound) {
+			t.Errorf("SetHeld of a missing project = %v", err)
+		}
 		if err := s.SetStopped(ctx, "gone", true); !errors.Is(err, projects.ErrNotFound) {
 			t.Errorf("SetStopped of a missing project = %v", err)
 		}

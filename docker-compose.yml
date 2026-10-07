@@ -1,5 +1,13 @@
 name: lighthouse
 
+# Lighthouse deploys itself: only release tags (v1.2.3), and as infrastructure
+# (after sparkdb, before the apps). Its deploys hand off to the update helper
+# container, which swaps it and puts the old one back if the new one isn't
+# healthy. Its first deploy is by hand (DOCUMENTATION.md section 10).
+x-lighthouse:
+  deploy: releases
+  tier: infra
+
 services:
   lighthouse:
     build:
@@ -7,11 +15,14 @@ services:
       dockerfile: Dockerfile
     container_name: lighthouse
     environment:
-      # Plain settings, written out: Lighthouse is deployed by hand, and none
-      # of these are secrets. Its own secrets (the GitHub token and the
-      # database URLs) it reads from Cove at startup.
+      # Plain settings, written out: none of these are secrets. Its own
+      # secrets (the GitHub token and the database URLs) it reads from Cove
+      # at startup; this file must never need any (the update helper
+      # couldn't keep them).
       - APP_ENV=prod
-      - LIGHTHOUSE_VERSION=dev   # set to the release version when releasing
+      # The release being deployed, given by Lighthouse to every deploy;
+      # "dev" when started by hand.
+      - LIGHTHOUSE_VERSION=${LIGHTHOUSE_DEPLOY_VERSION:-dev}
       - COVE_URL=http://cove:2100
       - COVE_TOKEN_PATH=/app/vault/cove/token
       # Deploy folders. Mounted at the same path on the host and in here, so a
@@ -50,6 +61,14 @@ services:
     # No terminal is attached: open the CLI with
     #   docker exec -it lighthouse /lighthouse shell
     restart: unless-stopped
+    # Healthy once the daemon answers on its control socket. The update
+    # helper waits for this before keeping a new version.
+    healthcheck:
+      test: ["CMD", "/lighthouse", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     # A deploy that already replaced a project's containers finishes its
     # health check (or rollback) before Lighthouse stops.
     stop_grace_period: 2m
