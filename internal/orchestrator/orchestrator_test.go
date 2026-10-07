@@ -15,6 +15,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/github"
 	"github.com/lsariol/lighthouse/internal/projects"
 	"github.com/lsariol/lighthouse/internal/projects/projectstest"
+	"github.com/lsariol/lighthouse/internal/settings"
 )
 
 // fakeRepo is one repository on the fake GitHub.
@@ -422,6 +423,31 @@ func TestReleaseMode(t *testing.T) {
 	}
 	if h, _ := store.History(ctx, "cove", 1); h[0].Version != "v1.2.0" {
 		t.Errorf("history: %+v", h[0])
+	}
+}
+
+func TestSettingsComeFromTheBranch(t *testing.T) {
+	gh := newGitHub(map[string]string{"cove": "head"})
+	gh.repos["cove"].compose = releases("infra")
+	gh.repos["cove"].tags = []github.Tag{{Name: "v1.0.0", SHA: "old"}}
+	o, store, d, _ := setup(t, gh, "cove")
+	ctx := context.Background()
+	d.result = func(req deploy.Request) deploy.Result {
+		return deploy.Result{Status: projects.StatusSucceeded, Settings: settings.Default}
+	}
+
+	o.Scan(ctx)
+	o.Scan(ctx)
+	p := get(t, store, "cove")
+	if d.list() != "cove@v1.0.0" || p.Mode != "releases" || p.Tier != "infra" {
+		t.Errorf("deployed %s; mode %q, tier %q", d.list(), p.Mode, p.Tier)
+	}
+
+	o2, store2, d2, _ := setup(t, newGitHub(map[string]string{"cove": "head"}), "cove")
+	o2.github.(*fakeGitHub).repos["cove"].compose = releases("infra")
+	o2.github.(*fakeGitHub).repos["cove"].tags = []github.Tag{{Name: "v1.0.0", SHA: "old"}}
+	if err := o2.Deploy(ctx, "cove", ""); err != nil || d2.list() != "cove@v1.0.0" || get(t, store2, "cove").Mode != "releases" {
+		t.Errorf("deploy before any check: %v, deployed %s", err, d2.list())
 	}
 }
 

@@ -432,9 +432,20 @@ var ErrNothingToRollBackTo = errors.New("no earlier successful deploy to go back
 // manualTarget is what `deploy` and `check` act on: ref (a tag or a commit),
 // or the newest release or commit.
 func (o *Orchestrator) manualTarget(ctx context.Context, p projects.Project, ref string) (target, error) {
-	if ref == "" && p.Mode != settings.DeployReleases {
-		sha, err := o.github.LatestCommit(ctx, p.Repo, o.gitToken)
-		return target{sha: sha}, err
+	if ref == "" {
+		head, err := o.github.LatestCommit(ctx, p.Repo, o.gitToken)
+		if err != nil {
+			return target{}, err
+		}
+		if w := o.watchOf(p.Name); w.settingsSHA != head {
+			if err := o.readSettings(ctx, &p, head); err != nil {
+				return target{}, err
+			}
+			w.settingsSHA = head
+		}
+		if p.Mode != settings.DeployReleases {
+			return target{sha: head}, nil
+		}
 	}
 	tags, _, err := o.github.Tags(ctx, p.Repo, o.gitToken, "")
 	if err != nil {
@@ -588,11 +599,6 @@ func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target,
 		d.Error = projects.ErrorText(res.Err)
 	}
 	o.recordDeployment(ctx, d)
-	if s := res.Settings; s.Tier != "" && (s.Deploy != p.Mode || s.Tier != p.Tier) {
-		if err := o.store.SetSettings(context.WithoutCancel(ctx), p.Name, s.Deploy, s.Tier); err != nil && !errors.Is(err, projects.ErrNotFound) {
-			slog.Error("recording a project's x-lighthouse settings failed", "project", p.Name, "err", err)
-		}
-	}
 
 	w := o.watchOf(p.Name)
 	if res.Err == nil {
