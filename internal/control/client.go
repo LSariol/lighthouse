@@ -134,6 +134,12 @@ func (c *Client) Retry(ctx context.Context, name string) error {
 	return c.call(ctx, http.MethodPost, project(name)+"/retry", nil, nil)
 }
 
+func (c *Client) Check(ctx context.Context, name string) (Deployment, error) {
+	var d Deployment
+	err := c.call(ctx, http.MethodPost, project(name)+"/check", nil, &d)
+	return d, err
+}
+
 func (c *Client) Report(ctx context.Context, name string, n int) (Deployment, error) {
 	var d Deployment
 	err := c.call(ctx, http.MethodGet, project(name)+"/report?n="+strconv.Itoa(n), nil, &d)

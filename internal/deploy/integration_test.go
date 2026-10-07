@@ -38,7 +38,7 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      - SECRET=${E2E_SECRET}
+      - SECRET=${LIGHTHOUSE_E2E_SECRET}
     healthcheck:
       test: ["CMD", "test", "-f", "/ok"]
       interval: 1s
@@ -64,7 +64,7 @@ services:
 
 	source := &fakeSource{}
 	var log bytes.Buffer
-	dep := New(runner, d, source, &fakeSecrets{values: map[string]string{"E2E_SECRET": "very-secret-value"}}, Options{
+	dep := New(runner, d, source, &fakeSecrets{values: map[string]string{"LIGHTHOUSE_E2E_SECRET": "very-secret-value"}}, Options{
 		Root: t.TempDir(), Log: &log, Poll: 500 * time.Millisecond,
 		Timeouts: Timeouts{Verify: 60 * time.Second, Stable: 2 * time.Second},
 	})

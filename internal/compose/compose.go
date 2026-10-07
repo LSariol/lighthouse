@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -22,6 +23,9 @@ type Project struct {
 	// one, the folder it's in.
 	Name     string
 	Services []Service
+	// Config is the whole config, as JSON, for the deploy rules (see
+	// internal/policy).
+	Config []byte
 }
 
 // Service is one service of a compose project.
@@ -29,6 +33,11 @@ type Service struct {
 	Name  string
 	Image string // the `image:` it names, or "" for a service that's only built
 	Build bool   // built from a Dockerfile
+	// Context and Dockerfile say what's built: the build context (a folder,
+	// or a Git URL) and the Dockerfile's path, absolute for a folder.
+	// Dockerfile is "" for an inline one.
+	Context    string
+	Dockerfile string
 }
 
 // ImageName is the image Compose gives the service: its `image:`, or
@@ -113,17 +122,35 @@ func (r Runner) Inspect(ctx context.Context, dir string) (Project, error) {
 	var raw struct {
 		Name     string `json:"name"`
 		Services map[string]struct {
-			Image string          `json:"image"`
-			Build json.RawMessage `json:"build"`
+			Image string `json:"image"`
+			Build *struct {
+				Context          string `json:"context"`
+				Dockerfile       string `json:"dockerfile"`
+				DockerfileInline string `json:"dockerfile_inline"`
+			} `json:"build"`
 		} `json:"services"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return Project{}, fmt.Errorf("docker compose config: unexpected output: %v", err)
 	}
 
-	p := Project{Name: raw.Name}
+	p := Project{Name: raw.Name, Config: out}
 	for name, s := range raw.Services {
-		p.Services = append(p.Services, Service{Name: name, Image: s.Image, Build: len(s.Build) > 0 && string(s.Build) != "null"})
+		svc := Service{Name: name, Image: s.Image}
+		if b := s.Build; b != nil {
+			svc.Build = true
+			svc.Context = b.Context
+			if b.DockerfileInline == "" && !strings.Contains(b.Context, "://") {
+				svc.Dockerfile = b.Dockerfile
+				if svc.Dockerfile == "" {
+					svc.Dockerfile = "Dockerfile"
+				}
+				if !filepath.IsAbs(svc.Dockerfile) {
+					svc.Dockerfile = filepath.Join(b.Context, svc.Dockerfile)
+				}
+			}
+		}
+		p.Services = append(p.Services, svc)
 	}
 	sort.Slice(p.Services, func(i, j int) bool { return p.Services[i].Name < p.Services[j].Name })
 	return p, nil
@@ -157,6 +184,28 @@ func (r Runner) Variables(ctx context.Context, dir string) ([]Variable, error) {
 // Build builds the project's images. env holds its variables (KEY=value).
 func (r Runner) Build(ctx context.Context, dir string, project string, env []string, out io.Writer) error {
 	return r.run(ctx, dir, env, out, "-p", project, "build")
+}
+
+// BuildStage builds one stage of a Dockerfile, e.g. its test stage, with
+// nothing from the compose file: no build arguments and no secrets. Its
+// output goes to out.
+func (r Runner) BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error {
+	bin := r.Docker
+	if bin == "" {
+		bin = "docker"
+	}
+	var tail tailBuffer
+	cmd := exec.CommandContext(ctx, bin, "build", "--target", target, "--file", dockerfile, buildContext)
+	cmd.Env = BaseEnv()
+	w := io.MultiWriter(&tail, out)
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("docker build --target %s: %w", target, ctx.Err())
+		}
+		return fmt.Errorf("docker build --target %s failed (%v): %s", target, err, tail.lastLines(3))
+	}
+	return nil
 }
 
 // Up starts the project from images already built, replacing its running

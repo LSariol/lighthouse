@@ -5,6 +5,9 @@
 //
 //	fetch    download the exact commit through the GitHub API and unpack it
 //	inspect  read the compose file: its project name, services, variables
+//	check    the deploy rules (internal/policy): nothing that reaches outside
+//	         the project, its own secrets only, no name taken on spark
+//	test     the Dockerfile's test stage, if it has one
 //	secrets  fetch every ${KEY} without a default from Cove, in one request
 //	build    build the images; tag the running ones for rollback first
 //	swap     docker compose up: the only moment of downtime
@@ -13,6 +16,8 @@
 //
 // Every step's output is kept (the tail, with secret values hidden) and
 // returned in the Result, and also written to the log as it happens.
+//
+// Check runs the steps up to test as a dry run, changing nothing.
 package deploy
 
 import (
@@ -32,6 +37,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/compose"
 	"github.com/lsariol/lighthouse/internal/docker"
 	"github.com/lsariol/lighthouse/internal/github"
+	"github.com/lsariol/lighthouse/internal/policy"
 	"github.com/lsariol/lighthouse/internal/projects"
 )
 
@@ -40,12 +46,14 @@ type Compose interface {
 	Inspect(ctx context.Context, dir string) (compose.Project, error)
 	Variables(ctx context.Context, dir string) ([]compose.Variable, error)
 	Build(ctx context.Context, dir string, project string, env []string, out io.Writer) error
+	BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error
 	Up(ctx context.Context, dir string, project string, env []string, out io.Writer) error
 }
 
 // Docker reads containers and manages images. *docker.Client implements it.
 type Docker interface {
 	ProjectContainers(ctx context.Context, project string) ([]docker.Container, error)
+	NetworkNames(ctx context.Context, network string) ([]docker.NetworkName, error)
 	Inspect(ctx context.Context, id string) (docker.Detail, error)
 	Tag(ctx context.Context, source string, target string) error
 	Tags(ctx context.Context, repository string, prefix string) ([]string, error)
@@ -89,7 +97,12 @@ type Options struct {
 	// so a relative bind mount in a project's compose file resolves to the
 	// same files for Compose (in Lighthouse's container) and Docker (on the
 	// host).
-	Root     string
+	Root string
+	// Storage is the root of the projects' data folders: a project may
+	// mount host paths from Storage/<compose project>/ (and its own files).
+	Storage string
+	// Policy holds the exceptions to the deploy rules (policy.json).
+	Policy   policy.Policy
 	Timeouts Timeouts
 	// Log receives every step's output as it happens (secret values hidden).
 	// Nothing if nil.
@@ -105,6 +118,8 @@ type Deployer struct {
 	source   Source
 	secrets  Secrets
 	root     string
+	storage  string
+	policy   policy.Policy
 	timeouts Timeouts
 	log      io.Writer
 	poll     time.Duration
@@ -134,7 +149,8 @@ func New(c Compose, d Docker, s Source, sec Secrets, opts Options) *Deployer {
 	if poll == 0 {
 		poll = 2 * time.Second
 	}
-	return &Deployer{compose: c, docker: d, source: s, secrets: sec, root: opts.Root, timeouts: t, log: log, poll: poll}
+	return &Deployer{compose: c, docker: d, source: s, secrets: sec, root: opts.Root, storage: opts.Storage, policy: opts.Policy,
+		timeouts: t, log: log, poll: poll}
 }
 
 // Request is one deploy.
@@ -145,7 +161,8 @@ type Request struct {
 
 	// Claim is called with the compose project the compose file names, before
 	// anything changes. An error (e.g. another project has it) stops the
-	// deploy. The orchestrator records it in the store.
+	// deploy. The orchestrator records it in the store (for a Check, it only
+	// looks).
 	Claim func(ctx context.Context, composeProject string) error
 }
 
@@ -163,6 +180,8 @@ type Result struct {
 const (
 	StepFetch   = "fetch"
 	StepInspect = "inspect"
+	StepCheck   = "check"
+	StepTest    = "test"
 	StepSecrets = "secrets"
 	StepBuild   = "build"
 	StepSwap    = "swap"
@@ -170,7 +189,10 @@ const (
 	StepCleanup = "cleanup"
 )
 
-var stepOrder = []string{StepFetch, StepInspect, StepSecrets, StepBuild, StepSwap, StepVerify, StepCleanup}
+var stepOrder = []string{StepFetch, StepInspect, StepCheck, StepTest, StepSecrets, StepBuild, StepSwap, StepVerify, StepCleanup}
+
+// checkOrder are the steps Check runs.
+var checkOrder = stepOrder[:4]
 
 // failure is a step's error, with whether retrying later may help.
 type failure struct {
@@ -190,6 +212,7 @@ type run struct {
 	scrub    *scrubber // hides secret values in output, once they're known
 	stepLog  *tail
 	previous map[string]string // service → image ID running before the swap
+	dry      bool              // Check: change nothing, stop after the test step
 }
 
 // Deploy deploys req.Project at req.SHA. A second call waits for the first.
@@ -211,6 +234,19 @@ func (d *Deployer) Deploy(ctx context.Context, req Request) Result {
 	return res
 }
 
+// Check runs a deploy's first steps (fetch, inspect, check, test) as a dry
+// run: nothing is claimed, moved into place, built or started, and the
+// download is deleted afterwards. A second call waits for a running deploy.
+func (d *Deployer) Check(ctx context.Context, req Request) Result {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	r := &run{d: d, req: req, dry: true, log: slog.With("project", req.Project.Name, "sha", short(req.SHA), "check", true)}
+	res := r.deploy(ctx)
+	res.Steps = r.steps
+	return res
+}
+
 func (r *run) deploy(ctx context.Context) Result {
 	var res Result
 	fail := func(step string, f *failure) Result {
@@ -223,6 +259,10 @@ func (r *run) deploy(ctx context.Context) Result {
 	}
 
 	incoming := filepath.Join(r.d.root, ".incoming", short12(r.req.SHA))
+	if r.dry {
+		incoming = filepath.Join(r.d.root, ".check", short12(r.req.SHA))
+		defer os.RemoveAll(incoming)
+	}
 	if f := r.step(ctx, StepFetch, func(ctx context.Context, out io.Writer) *failure {
 		return r.fetch(ctx, incoming, out)
 	}); f != nil {
@@ -242,6 +282,25 @@ func (r *run) deploy(ctx context.Context) Result {
 		return fail(StepInspect, f)
 	}
 	res.ComposeProject = project.Name
+
+	if f := r.step(ctx, StepCheck, func(ctx context.Context, out io.Writer) *failure {
+		return r.check(ctx, project, dir, keys, out)
+	}); f != nil {
+		r.removeUnlessCurrent(dir)
+		return fail(StepCheck, f)
+	}
+
+	if f := r.step(ctx, StepTest, func(ctx context.Context, out io.Writer) *failure {
+		return r.test(ctx, project, out)
+	}); f != nil {
+		r.removeUnlessCurrent(dir)
+		return fail(StepTest, f)
+	}
+
+	if r.dry {
+		res.Status = projects.StatusSucceeded
+		return res
+	}
 
 	var env []string
 	if f := r.step(ctx, StepSecrets, func(ctx context.Context, out io.Writer) *failure {
@@ -326,8 +385,12 @@ func (r *run) step(ctx context.Context, name string, fn func(ctx context.Context
 // skipRemaining records every step after failed as skipped, except the
 // rollback's own record.
 func (r *run) skipRemaining(failed string) {
+	order := stepOrder
+	if r.dry {
+		order = checkOrder
+	}
 	after := false
-	for _, name := range stepOrder {
+	for _, name := range order {
 		if after {
 			now := time.Now()
 			r.steps = append(r.steps, projects.Step{Name: name, Status: projects.StepSkipped, StartedAt: now, FinishedAt: now})
@@ -342,7 +405,7 @@ func (d *Deployer) timeout(step string) time.Duration {
 	switch step {
 	case StepFetch:
 		return d.timeouts.Fetch
-	case StepBuild:
+	case StepBuild, StepTest:
 		return d.timeouts.Build
 	case StepSwap:
 		return d.timeouts.Swap
@@ -415,20 +478,31 @@ func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (comp
 		}
 	}
 
-	dir := filepath.Join(r.d.root, project.Name, short12(r.req.SHA))
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
-		return project, "", nil, transient(err)
-	}
-	if dir != r.currentDir(project.Name) {
-		os.RemoveAll(dir)
-	}
-	if err := os.Rename(incoming, dir); err != nil {
-		if _, statErr := os.Stat(dir); statErr != nil {
-			return project, "", nil, transient(fmt.Errorf("move the files into place: %w", err))
+	dir := incoming
+	if !r.dry {
+		dir = filepath.Join(r.d.root, project.Name, short12(r.req.SHA))
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			return project, "", nil, transient(err)
 		}
-		// The same commit is already unpacked there (it's the one running):
-		// use it as it is.
-		os.RemoveAll(incoming)
+		if dir != r.currentDir(project.Name) {
+			os.RemoveAll(dir)
+		}
+		if err := os.Rename(incoming, dir); err != nil {
+			if _, statErr := os.Stat(dir); statErr != nil {
+				return project, "", nil, transient(fmt.Errorf("move the files into place: %w", err))
+			}
+			// The same commit is already unpacked there (it's the one running):
+			// use it as it is.
+			os.RemoveAll(incoming)
+		}
+
+		// The config's paths are absolute: read it again where the files are
+		// now, for the checks and the build.
+		moved, err := r.d.compose.Inspect(ctx, dir)
+		if err != nil {
+			return project, dir, nil, permanent(fmt.Errorf("the compose file can't be read: %w", err))
+		}
+		project.Services, project.Config = moved.Services, moved.Config
 	}
 
 	vars, err := r.d.compose.Variables(ctx, dir)
@@ -445,6 +519,67 @@ func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (comp
 		keys = append(keys, v.Name)
 	}
 	return project, dir, keys, nil
+}
+
+// check applies the deploy rules (internal/policy) to the compose file, with
+// the exceptions in policy.json.
+func (r *run) check(ctx context.Context, project compose.Project, dir string, keys []string, out io.Writer) *failure {
+	names, err := r.d.docker.NetworkNames(ctx, policy.SharedNetwork)
+	if err != nil {
+		return transient(fmt.Errorf("Docker: %w", err))
+	}
+	taken := map[string]string{}
+	for _, n := range names {
+		if n.Project != project.Name {
+			taken[n.Name] = n.Container
+		}
+	}
+
+	findings, err := policy.Check(policy.Input{
+		Project: project.Name, Config: project.Config, Dir: dir, Storage: r.d.storage, Secrets: keys, Taken: taken,
+	})
+	if err != nil {
+		return permanent(err)
+	}
+	refused := r.d.policy.Apply(project.Name, findings)
+	for _, f := range findings {
+		fmt.Fprintln(out, f)
+	}
+	if len(refused) > 0 {
+		return permanent(errors.New(policy.Summary(refused)))
+	}
+	fmt.Fprintln(out, "the compose file follows the deploy rules")
+	return nil
+}
+
+// testStage finds a Dockerfile stage named test: FROM <image> AS test.
+var testStage = regexp.MustCompile(`(?im)^\s*FROM\s+.+\s+AS\s+test\s*$`)
+
+// test builds the test stage of every Dockerfile that has one. It gets
+// nothing from the compose file (no secrets, no build arguments), and a
+// failure stops the deploy before anything else happens.
+func (r *run) test(ctx context.Context, project compose.Project, out io.Writer) *failure {
+	seen := map[string]bool{}
+	ran := 0
+	for _, s := range project.Services {
+		if !s.Build || s.Dockerfile == "" || seen[s.Dockerfile] {
+			continue
+		}
+		seen[s.Dockerfile] = true
+		data, err := os.ReadFile(s.Dockerfile)
+		if err != nil || !testStage.Match(data) {
+			continue
+		}
+		fmt.Fprintf(out, "running the test stage of %s's Dockerfile\n", s.Name)
+		if err := r.d.compose.BuildStage(ctx, s.Context, s.Dockerfile, "test", out); err != nil {
+			return permanent(fmt.Errorf("%s's tests failed: %w", s.Name, err))
+		}
+		ran++
+	}
+	if ran == 0 {
+		fmt.Fprintln(out, "no test stage (a Dockerfile stage named test, FROM ... AS test, runs here before every deploy)")
+	}
+	return nil
 }
 
 // fetchSecrets gets the values of keys from Cove, as KEY=value lines, and

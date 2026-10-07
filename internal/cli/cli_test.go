@@ -63,6 +63,19 @@ func (f *fakeService) Remove(ctx context.Context, name string, down bool) error 
 	}
 	return f.act("remove", name)
 }
+func (f *fakeService) Check(ctx context.Context, name string) (control.Deployment, error) {
+	if err := f.act("check", name); err != nil {
+		return control.Deployment{}, err
+	}
+	now := time.Now()
+	d := control.Deployment{Commit: "abcdef123", Trigger: "check", Status: "succeeded", StartedAt: now, FinishedAt: now,
+		Steps: []control.Step{{Name: "check", Status: "succeeded", Log: "the compose file follows the deploy rules"}}}
+	if name == "bad" {
+		d.Status, d.FailedStep, d.Error = "failed", "check", "check: the compose file breaks the deploy rules (privileged)"
+		d.Steps[0] = control.Step{Name: "check", Status: "failed", Log: "✗ web: privileged: true gives the container root on the host [privileged]"}
+	}
+	return d, nil
+}
 func (f *fakeService) Retry(ctx context.Context, name string) error { return f.act("retry", name) }
 func (f *fakeService) Report(ctx context.Context, name string, n int) (control.Deployment, error) {
 	start := time.Now().Add(-time.Hour)
@@ -451,6 +464,26 @@ func TestRemove(t *testing.T) {
 	}
 	if strings.Join(svc.calls, ",") != "remove plop" {
 		t.Errorf("remove --keep: calls = %v", svc.calls)
+	}
+}
+
+func TestCheck(t *testing.T) {
+	out, errOut, err := run(t, newFake("plop"), "check plop")
+	if err != nil || !strings.Contains(out, "the compose file follows the deploy rules") || !strings.Contains(errOut, `✓ "plop" passes the checks`) {
+		t.Errorf("check plop: %v\n%s\n%s", err, out, errOut)
+	}
+
+	out, _, err = run(t, newFake("bad"), "check bad")
+	if err == nil || !strings.Contains(err.Error(), "fails at check") || !strings.Contains(out, "[privileged]") {
+		t.Errorf("check bad: %v\n%s", err, out)
+	}
+
+	var usage usageError
+	if _, _, err := run(t, newFake("plop"), "check"); !errors.As(err, &usage) {
+		t.Errorf("check without a name = %v, want a usage error", err)
+	}
+	if out, _, err := run(t, newFake(), "help rules"); err != nil || !strings.Contains(out, "policy.json") {
+		t.Errorf("help rules: %v\n%s", err, out)
 	}
 }
 

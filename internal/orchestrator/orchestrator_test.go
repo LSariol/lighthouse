@@ -30,6 +30,7 @@ func (f fakeCommits) LatestCommit(ctx context.Context, repo github.Repo, token s
 type fakeDeployer struct {
 	mu       sync.Mutex
 	deployed []string // "name@sha"
+	checked  []string
 	result   func(req deploy.Request) deploy.Result
 }
 
@@ -49,6 +50,18 @@ func (f *fakeDeployer) Deploy(ctx context.Context, req deploy.Request) deploy.Re
 	}
 	return deploy.Result{Status: projects.StatusSucceeded, ComposeProject: compose,
 		Steps: []projects.Step{{Name: deploy.StepFetch, Status: projects.StepSucceeded}}}
+}
+
+func (f *fakeDeployer) Check(ctx context.Context, req deploy.Request) deploy.Result {
+	f.mu.Lock()
+	f.checked = append(f.checked, req.Project.Name+"@"+req.SHA)
+	f.mu.Unlock()
+	if req.Claim != nil {
+		if err := req.Claim(ctx, strings.ToLower(req.Project.Repo.Name)); err != nil {
+			return deploy.Result{Status: projects.StatusFailed, FailureKind: projects.FailurePermanent, FailedStep: deploy.StepInspect, Err: err}
+		}
+	}
+	return deploy.Result{Status: projects.StatusSucceeded}
 }
 
 func (f *fakeDeployer) count() int {
@@ -203,6 +216,38 @@ func TestComposeProjectConflict(t *testing.T) {
 	err := o.Deploy(ctx, "second")
 	if err == nil || !strings.Contains(err.Error(), `"site" belongs to first already`) {
 		t.Errorf("second deploy = %v, want it to name first", err)
+	}
+}
+
+func TestCheck(t *testing.T) {
+	store := &projectstest.Store{}
+	ctx := context.Background()
+	store.Add(ctx, "first", github.Repo{Owner: "x", Name: "site"})
+	store.Add(ctx, "second", github.Repo{Owner: "y", Name: "site"})
+	d := &fakeDeployer{}
+	o := New(store, fakeCommits{"site": "aaa"}, d, "t")
+
+	// Nothing is deployed, recorded or claimed.
+	res, sha, err := o.Check(ctx, "first")
+	if err != nil || sha != "aaa" || res.Status != projects.StatusSucceeded {
+		t.Fatalf("Check = %+v, %q, %v", res, sha, err)
+	}
+	if len(d.deployed) != 0 || get(t, store, "first").ComposeProject != "" {
+		t.Errorf("Check deployed %v or claimed %q", d.deployed, get(t, store, "first").ComposeProject)
+	}
+	if h, _ := store.History(ctx, "first", 10); len(h) != 0 {
+		t.Errorf("Check was recorded: %+v", h)
+	}
+
+	// It does say when the compose project is another project's.
+	if err := o.Deploy(ctx, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if res, _, _ := o.Check(ctx, "second"); res.Err == nil || !strings.Contains(res.Err.Error(), "belongs to first") {
+		t.Errorf("Check of a clashing project = %v", res.Err)
+	}
+	if res, _, _ := o.Check(ctx, "first"); res.Err != nil {
+		t.Errorf("Check of the project that has it = %v", res.Err)
 	}
 }
 

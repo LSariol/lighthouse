@@ -51,6 +51,10 @@ func (f *fakeService) Retry(ctx context.Context, name string) error {
 	f.record("retry " + name)
 	return nil
 }
+func (f *fakeService) Check(ctx context.Context, name string) (Deployment, error) {
+	f.record("check " + name)
+	return Deployment{Commit: "abc", Status: "failed", FailedStep: "check", Steps: []Step{{Name: "check", Status: "failed", Log: "✗ web: privileged"}}}, nil
+}
 func (f *fakeService) Report(ctx context.Context, name string, n int) (Deployment, error) {
 	f.record(fmt.Sprintf("report %s %d", name, n))
 	return Deployment{Status: "rolled_back", Steps: []Step{{Name: "verify", Status: "failed", Log: "web is unhealthy"}}}, nil
@@ -136,6 +140,11 @@ func TestRoundTrip(t *testing.T) {
 		t.Errorf("Report = %+v, %v", report, err)
 	}
 
+	check, err := c.Check(ctx, "plop")
+	if err != nil || check.FailedStep != "check" || len(check.Steps) != 1 || check.Steps[0].Log != "✗ web: privileged" {
+		t.Errorf("Check = %+v, %v", check, err)
+	}
+
 	history, err := c.History(ctx, "plop", 5)
 	if err != nil || len(history) != 1 || history[0].Error != "build failed" {
 		t.Errorf("History = %+v, %v", history, err)
@@ -157,7 +166,7 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 
-	want := []string{"add new https://github.com/a/new", "logs plop", "report plop 2", "history plop 5", "rename plop plop2", "set-url plop https://github.com/a/b",
+	want := []string{"add new https://github.com/a/new", "logs plop", "report plop 2", "check plop", "history plop 5", "rename plop plop2", "set-url plop https://github.com/a/b",
 		"retry plop", "start plop:web", "stop plop", "restart plop", "scan", "pause", "resume"}
 	if len(svc.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", svc.calls, want)

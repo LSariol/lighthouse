@@ -220,6 +220,20 @@ func commandTable(embedded bool) []command {
 			complete: names,
 		},
 		{
+			names:    []string{"check"},
+			group:    groupDeploying,
+			synopsis: "<name>",
+			summary:  "Run the deploy's checks without deploying",
+			usages: []usage{
+				{"check <name>", "Download the latest commit and run it through the deploy rules and its Dockerfile's test stage, as a deploy would, without deploying it or recording it. Exits non-zero if a deploy would be refused. The rules: \"help rules\"."},
+			},
+			examples: []example{
+				{"check plop", "would plop's latest commit deploy?"},
+			},
+			run:      (*CLI).check,
+			complete: names,
+		},
+		{
 			names:    []string{"scan"},
 			group:    groupDeploying,
 			summary:  "Check every project for new commits now",
@@ -352,6 +366,7 @@ var guides = []struct {
 }{
 	{"setup", "What a repository needs to be deployed", setupGuide},
 	{"failed", "What to do when a deploy fails", failedGuide},
+	{"rules", "What a deploy refuses, and how to allow it", rulesGuide},
 }
 
 const setupGuide = `Getting a repository ready for Lighthouse (e.g. "plop")
@@ -364,10 +379,11 @@ const setupGuide = `Getting a repository ready for Lighthouse (e.g. "plop")
    Give anything on spark a name no other project uses (a container_name,
    or a network alias such as plop-web): names on a shared network
    answer for every container that has them.
-   Data that must survive a deploy goes in an absolute host path,
-   /srv/server/storage/plop/..., never a relative ./folder.
+   Data that must survive a deploy goes in /srv/server/storage/plop/...
+   (the compose project's folder) or a named volume, never ./folder.
 
-2. Secrets as ${KEY} placeholders, named PROJECT_PLATFORM_TYPE:
+2. Secrets as ${KEY} placeholders, named PROJECT_PLATFORM_TYPE, where
+   PROJECT is the compose project (PLOP_...) or SHARED for shared keys:
      environment:
        - DATABASE_URL=${PLOP_DATABASE_URL}
        - LOG_LEVEL=info          plain settings are written out
@@ -379,12 +395,48 @@ const setupGuide = `Getting a repository ready for Lighthouse (e.g. "plop")
    waits until it's healthy, and puts the old version back if it isn't.
    Without one, a service only has to stay up for 10 seconds.
 
-4. Add it. It's named after the repository (lowercase):
+4. Optional: tests. A Dockerfile stage named test (FROM ... AS test) is
+   built before every deploy, without secrets; if it fails, nothing is
+   deployed.
+
+5. Add it. It's named after the repository (lowercase):
      add https://github.com/LSariol/plop
+     check plop                  would it deploy? (nothing is changed)
    Lighthouse deploys the default branch's latest commit within a check.
    "status" shows each service; "logs plop:web" one service's output.
 
+What a deploy refuses: "help rules".
+
 The full rules: DOCUMENTATION.md §7 in the Lighthouse repository.`
+
+const rulesGuide = `What a deploy refuses
+
+Before anything is built, the compose file is checked. These stop a
+deploy (the ID in brackets is what an exception names):
+
+  privileged: true, cap_add, devices       [privileged] [cap_add:NET_ADMIN]
+  network_mode/pid/ipc/uts/userns/cgroup:  [pid:host] [network_mode:host]
+    host, or another container's
+  security_opt that turns a protection     [security_opt:seccomp=unconfined]
+    off
+  host paths outside the repository and    [mount:/var/run/docker.sock]
+    /srv/server/storage/<compose project>/ [file:/etc/shadow] [link:...]
+  another project's volume or network      [volume:cove_data] [network:x]
+  a Cove key that isn't <PROJECT>_* or     [secret:BOTSUITE_COVE_TOKEN]
+    SHARED_*
+  a name on spark another project's        [name:web]
+    container already has
+
+A port published on every interface is only a warning.
+
+Allowing something (one project at a time):
+1. Add an exception to policy.json in Lighthouse's repository:
+     {"project": "sonar", "allow": ["mount:/var/run/docker.sock"],
+      "reason": "reads container stats"}
+   project is the compose project; an ID ending in * allows every ID that
+   starts with what comes before it.
+2. Commit it, and deploy Lighthouse.
+3. "check <name>" shows the finding as allowed; "retry <name>" deploys.`
 
 const failedGuide = `When a deploy fails
 
@@ -406,6 +458,8 @@ const failedGuide = `When a deploy fails
      forbidden_key            Lighthouse's Cove token can't read the key
      build failed             the Dockerfile has an error ("report" shows it)
      unhealthy / stopped      the new version doesn't start properly
+     breaks the deploy rules  "report" lists each; see "help rules"
+     tests failed             the Dockerfile's test stage failed
      belongs to <project>     two compose files use the same name:
      GitHub: 401              Lighthouse's GitHub token expired or was revoked
 

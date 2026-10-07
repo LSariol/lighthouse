@@ -59,6 +59,12 @@ func (fakeDeployer) Deploy(ctx context.Context, req deploy.Request) deploy.Resul
 	return deploy.Result{Status: projects.StatusSucceeded}
 }
 
+func (fakeDeployer) Check(ctx context.Context, req deploy.Request) deploy.Result {
+	return deploy.Result{Status: projects.StatusFailed, FailedStep: deploy.StepCheck, FailureKind: projects.FailurePermanent,
+		Err:   errors.New("check: the compose file breaks the deploy rules (privileged)"),
+		Steps: []projects.Step{{Name: deploy.StepCheck, Status: projects.StepFailed, Log: "✗ web: privileged: true"}}}
+}
+
 type fakeCommits struct{}
 
 func (fakeCommits) LatestCommit(ctx context.Context, repo github.Repo, token string) (string, error) {
@@ -250,6 +256,23 @@ func TestBeforeReady(t *testing.T) {
 		if kind(err) != control.KindUnavailable || !strings.Contains(err.Error(), PhaseDatabase) {
 			t.Errorf("%s before Ready = %v, want unavailable naming the phase", name, err)
 		}
+	}
+}
+
+func TestCheck(t *testing.T) {
+	d, _, _, store := newDaemon(t)
+	ctx := context.Background()
+
+	r, err := d.Check(ctx, "PERSONALWEBSITE")
+	if err != nil || r.Commit != "abc" || r.FailedStep != "check" || !strings.Contains(r.Error, "privileged") ||
+		len(r.Steps) != 1 || r.Steps[0].Log != "✗ web: privileged: true" {
+		t.Errorf("Check = %+v, %v", r, err)
+	}
+	if h, _ := store.History(ctx, "personalWebsite", 10); len(h) != 0 {
+		t.Error("a check was recorded as a deploy")
+	}
+	if _, err := d.Check(ctx, "nope"); kind(err) != control.KindNotFound {
+		t.Errorf("Check of an unknown project = %v", err)
 	}
 }
 

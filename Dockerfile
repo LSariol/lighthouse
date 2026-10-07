@@ -13,9 +13,10 @@ FROM alpine:3.24
 WORKDIR /app
 
 # Lighthouse drives the host's Docker through the mounted socket, so it needs
-# the Docker and Compose CLIs. It runs as root: the socket is root-equivalent
-# anyway, and its group ID differs from host to host.
-RUN apk add --no-cache docker-cli docker-cli-compose
+# the Docker and Compose CLIs, and buildx (BuildKit) for test stages. It runs
+# as root: the socket is root-equivalent anyway, and its group ID differs from
+# host to host.
+RUN apk add --no-cache docker-cli docker-cli-compose docker-cli-buildx
 
 COPY --from=builder /app/lighthouse /lighthouse
 

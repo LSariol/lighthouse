@@ -75,6 +75,10 @@ func Handler(svc Service) http.Handler {
 		respond(w, logs, err)
 	})
 
+	mux.HandleFunc("POST /v1/projects/{name}/check", func(w http.ResponseWriter, r *http.Request) {
+		result, err := svc.Check(r.Context(), r.PathValue("name"))
+		respond(w, result, err)
+	})
 	mux.HandleFunc("GET /v1/projects/{name}/report", func(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(r.URL.Query().Get("n"))
 		if err != nil {

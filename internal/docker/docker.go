@@ -99,6 +99,61 @@ func (c *Client) ProjectContainers(ctx context.Context, project string) ([]Conta
 	return containers, nil
 }
 
+// NetworkName is a name a container answers to on a network.
+type NetworkName struct {
+	Name      string
+	Container string // the container's name
+	Project   string // its compose project, or ""
+}
+
+// NetworkNames returns every name containers on the network answer to
+// (their names, service names and aliases), including stopped containers',
+// which come back when started. A container's short ID isn't listed.
+func (c *Client) NetworkNames(ctx context.Context, network string) ([]NetworkName, error) {
+	result, err := c.api.ContainerList(ctx, client.ContainerListOptions{
+		All:     true,
+		Filters: client.Filters{}.Add("network", network),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list containers on %s: %w", network, err)
+	}
+
+	var names []NetworkName
+	for _, s := range result.Items {
+		info, err := c.api.ContainerInspect(ctx, s.ID, client.ContainerInspectOptions{})
+		if IsNotFound(err) {
+			continue // removed meanwhile
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect %s: %w", s.ID, err)
+		}
+		ct := info.Container
+		container := strings.TrimPrefix(ct.Name, "/")
+		project := ct.Config.Labels[projectLabel]
+
+		seen := map[string]bool{}
+		add := func(n string) {
+			if n == "" || seen[n] || strings.HasPrefix(ct.ID, n) {
+				return
+			}
+			seen[n] = true
+			names = append(names, NetworkName{Name: n, Container: container, Project: project})
+		}
+		add(container)
+		if ct.NetworkSettings != nil {
+			if ep := ct.NetworkSettings.Networks[network]; ep != nil {
+				for _, n := range ep.DNSNames {
+					add(n)
+				}
+				for _, n := range ep.Aliases {
+					add(n)
+				}
+			}
+		}
+	}
+	return names, nil
+}
+
 // healthFromStatus reads the health from Docker's status text, e.g.
 // "Up 3 minutes (healthy)", for daemons whose container list doesn't
 // report it separately.

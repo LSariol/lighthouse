@@ -167,7 +167,30 @@ func (c *CLI) report(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	printDeployment(d)
+	return nil
+}
 
+func (c *CLI) check(ctx context.Context, args []string) error {
+	if len(args) != 2 {
+		return usageError{form: "check <name>"}
+	}
+	name := args[1]
+	info(fmt.Sprintf("Checking %q: downloading its latest commit and running the deploy's checks. Nothing is deployed.", name))
+	d, err := c.svc.Check(ctx, name)
+	if err != nil {
+		return err
+	}
+	printDeployment(d)
+	if d.Status != "succeeded" {
+		return fmt.Errorf("%q wouldn't deploy: it fails at %s. The step's output above says why; \"help rules\" lists the rules.", name, d.FailedStep)
+	}
+	success(fmt.Sprintf("%q passes the checks: its latest commit would deploy.", name))
+	return nil
+}
+
+// printDeployment shows a deploy (or a check) and each step's output.
+func printDeployment(d control.Deployment) {
 	started := d.StartedAt
 	fields([][2]string{
 		{"Commit", orDash(d.Commit)},
@@ -186,7 +209,6 @@ func (c *CLI) report(ctx context.Context, args []string) error {
 			out(log)
 		}
 	}
-	return nil
 }
 
 // result describes how a deploy went: "succeeded", "failed at build",

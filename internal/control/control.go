@@ -29,6 +29,10 @@ type Service interface {
 	SetURL(ctx context.Context, name string, url string) error
 
 	Deploy(ctx context.Context, name string) error
+	// Check runs the project's latest commit through the deploy's checks
+	// (the rules and the test stage) without deploying it. The result, with
+	// its steps, isn't recorded in the history.
+	Check(ctx context.Context, name string) (Deployment, error)
 	// Retry clears a project's failures and broken state, and deploys it.
 	Retry(ctx context.Context, name string) error
 	Scan(ctx context.Context) error

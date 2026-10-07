@@ -10,7 +10,7 @@ import (
 // APP_ENV_PATH at a file that doesn't exist so a developer's .env is ignored.
 func setEnv(t *testing.T, vars map[string]string) {
 	t.Helper()
-	for _, name := range []string{"COVE_URL", "COVE_TOKEN_PATH", "STAGING_PATH",
+	for _, name := range []string{"COVE_URL", "COVE_TOKEN_PATH", "STAGING_PATH", "STORAGE_PATH",
 		"APP_ENV", "LIGHTHOUSE_VERSION", "LIGHTHOUSE_CONTROL_SOCKET", "LIGHTHOUSE_POLL_INTERVAL"} {
 		t.Setenv(name, vars[name])
 	}
@@ -35,6 +35,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ControlSocket != defaultControlSocket {
 		t.Errorf("ControlSocket = %q, want %q", cfg.ControlSocket, defaultControlSocket)
+	}
+	if cfg.StoragePath != "/srv/server/storage" {
+		t.Errorf("StoragePath = %q, want /srv/server/storage", cfg.StoragePath)
 	}
 	if cfg.PollInterval != defaultPollInterval {
 		t.Errorf("PollInterval = %s, want %s", cfg.PollInterval, defaultPollInterval)

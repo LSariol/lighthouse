@@ -139,3 +139,61 @@ func TestExitCodeFromStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkNames(t *testing.T) {
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("no Docker daemon")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	const project, network = "lighthouse-names-test", "lighthouse-names-test-net"
+	exec.Command("docker", "network", "create", network).Run()
+	dir := filepath.Join(t.TempDir(), "src")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(`
+services:
+  api:
+    image: alpine:3.24
+    command: ["sleep", "300"]
+    container_name: lhnt-api
+    networks:
+      shared:
+        aliases: [lhnt-alias]
+networks:
+  shared:
+    name: `+network+`
+    external: true
+`), 0o644)
+
+	r := compose.Runner{}
+	var out bytes.Buffer
+	t.Cleanup(func() {
+		r.Down(context.Background(), t.TempDir(), project, &out)
+		exec.Command("docker", "network", "rm", network).Run()
+	})
+	if err := r.Up(ctx, dir, project, nil, &out); err != nil {
+		t.Fatalf("Up: %v\n%s", err, out.String())
+	}
+
+	d, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	names, err := d.NetworkNames(ctx, network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, n := range names {
+		if n.Container != "lhnt-api" || n.Project != project {
+			t.Errorf("name %+v", n)
+		}
+		got = append(got, n.Name)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"api", "lhnt-alias", "lhnt-api"}) {
+		t.Errorf("names = %v, want api, lhnt-alias and lhnt-api (and no short ID)", got)
+	}
+}

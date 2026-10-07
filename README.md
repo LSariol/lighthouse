@@ -14,6 +14,7 @@ It's built for one person running their own projects on their own hardware: a ho
 
 - **Watches your repos.** Every few seconds it checks whether `main` has a new commit.
 - **Deploys safely.** New commit → download → build → swap. Your old version keeps running while the new one builds, and if the new one doesn't come up healthy, the old one is put back. A commit that keeps failing is set aside until you push a fix.
+- **Checks before it deploys.** A compose file that would reach outside its project (root on the host, another project's files or secrets, the Docker socket) is refused before anything is built, and a Dockerfile `test` stage runs first if there is one. Exceptions are written down in `policy.json`.
 - **Keeps secrets out of your code.** Your project's `docker-compose.yml` names the secrets it needs, like `${MYAPP_DATABASE_URL}`. Lighthouse fetches them from [Cove](https://github.com/LSariol/Cove), a small self-hosted vault, at deploy time. Nothing secret lives in the repo or on disk, and your app only reads normal environment variables.
 - **Gives you a control panel.** A simple command prompt to list projects, see what's running, read logs, redeploy, see how past deploys went, or pause deploys.
 - **Remembers what happened.** Every deploy is recorded in a small Postgres database, so you can see when something changed and why a deploy failed.
@@ -108,10 +109,11 @@ On its first start Lighthouse picks up its Cove access automatically. After that
 | `add <github-url>` | Start watching a project (named after the repository) |
 | `remove <name>` | Stop watching a project |
 | `deploy <name>` | Deploy now, even with no new commit |
+| `check <name>` | Would its latest commit deploy? (changes nothing) |
 | `logs <name>` | Show a project's recent output |
 | `history <name>` | How its recent deploys went |
 | `pause` / `resume` | Hold all deploys / carry on |
-| `help` | Everything else, with examples (`help setup` walks through preparing a repo) |
+| `help` | Everything else, with examples (`help setup` walks through preparing a repo; `help rules` lists what a deploy refuses) |
 
 ---
 

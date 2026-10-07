@@ -32,6 +32,10 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 - `govulncheck` is clean (the old `docker/docker` and OpenTelemetry advisories are gone).
 
 ### Added
+- **Deploy rules.** Before anything is built, a deploy checks its compose file: no privileged containers, host namespaces, added capabilities or devices; no host paths outside the repository and `/srv/server/storage/<compose project>/` (the Docker socket included; symlinks are followed); no other project's volumes or networks; only its own Cove keys (`<COMPOSE PROJECT>_*`) and `SHARED_*`; no name another project has on `spark`. Exceptions are in `policy.json`, built into the binary. `help rules` lists them.
+- **Test stages.** A Dockerfile stage named `test` is built before every deploy, without secrets; failing tests stop the deploy.
+- `check <name>`: runs a project's latest commit through the checks and its test stage without deploying it.
+- `STORAGE_PATH` (default `/srv/server/storage`), mounted read-only at the same path in `docker-compose.yml`. The image adds `docker-cli-buildx`.
 - **Safe deploys.** Build first, swap last: the running version keeps serving while the new one is downloaded, built and given its secrets; `docker compose up` is the only downtime; then every service must come up healthy (or stay up), and if one doesn't, the previous version is put back automatically.
 - **Broken projects.** A commit that fails 3 times for a reason retrying can't fix (it doesn't build, a secret is missing, it doesn't start) isn't tried again until a new commit arrives or `retry <name>`. Problems with GitHub, Cove or the network are just retried.
 - **Compose projects with several services.** The compose project's name comes from the compose file; its containers are found by Compose's labels. `start`, `stop`, `restart` and `logs` take `<name>` or `<name>:<service>`; `status` shows each service. `remove` also stops and removes a project's containers; `--keep` leaves them running.

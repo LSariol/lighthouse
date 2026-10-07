@@ -354,6 +354,37 @@ func (d *Daemon) Retry(ctx context.Context, name string) error {
 	return deployError(name, o.Retry(ctx, name))
 }
 
+// Check runs a project's latest commit through the deploy's checks without
+// deploying it. A commit that fails them isn't an error: the result says
+// which step failed and why.
+func (d *Daemon) Check(ctx context.Context, name string) (control.Deployment, error) {
+	_, o, err := d.parts()
+	if err != nil {
+		return control.Deployment{}, err
+	}
+	p, err := d.find(ctx, name)
+	if err != nil {
+		return control.Deployment{}, err
+	}
+	started := time.Now()
+	res, sha, err := o.Check(ctx, p.Name)
+	if err != nil {
+		return control.Deployment{}, control.Errorf(control.KindInternal, "Checking %s failed: %v.", p.Name, err)
+	}
+
+	out := control.Deployment{
+		Commit: sha, Trigger: "check", Status: res.Status, FailureKind: res.FailureKind, FailedStep: res.FailedStep,
+		StartedAt: started, FinishedAt: time.Now(),
+	}
+	if res.Err != nil {
+		out.Error = projects.ErrorText(res.Err)
+	}
+	for _, st := range res.Steps {
+		out.Steps = append(out.Steps, control.Step{Name: st.Name, Status: st.Status, StartedAt: st.StartedAt, FinishedAt: st.FinishedAt, Log: st.Log})
+	}
+	return out, nil
+}
+
 func deployError(name string, err error) error {
 	if err == nil {
 		return nil

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lsariol/coveclient"
+	"github.com/lsariol/lighthouse"
 	"github.com/lsariol/lighthouse/internal/cli"
 	"github.com/lsariol/lighthouse/internal/compose"
 	"github.com/lsariol/lighthouse/internal/config"
@@ -25,6 +26,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/docker"
 	"github.com/lsariol/lighthouse/internal/github"
 	"github.com/lsariol/lighthouse/internal/orchestrator"
+	"github.com/lsariol/lighthouse/internal/policy"
 	"github.com/lsariol/lighthouse/internal/projects"
 	"github.com/lsariol/lighthouse/internal/reposjson"
 )
@@ -160,6 +162,20 @@ func runServe(withShell bool) {
 // its store and orchestrator. While Cove or the database is unreachable it
 // waits and retries; other errors end startup.
 func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClient *docker.Client) (*database.Database, *orchestrator.Orchestrator, error) {
+	rules, err := policy.Parse(lighthouse.PolicyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(rules.Exceptions) > 0 {
+		slog.Info("deploy rule exceptions loaded", "exceptions", len(rules.Exceptions))
+	}
+	// The data folders are read to follow symlinks a container may have left
+	// there; without them, a link can't be spotted.
+	if _, err := os.Stat(cfg.StoragePath); err != nil {
+		slog.Warn("STORAGE_PATH isn't readable, so symlinks in the projects' data folders can't be checked: mount it read-only at the same path",
+			"path", cfg.StoragePath, "err", err)
+	}
+
 	coveClient := coveclient.New(cfg.CoveURL, "")
 
 	d.SetPhase(daemon.PhaseWaiting)
@@ -180,8 +196,10 @@ func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClien
 	// The archive download has no overall timeout of its own: the fetch
 	// step's deadline limits it. Commit checks are quick, so 30 seconds.
 	deployer := deploy.New(compose.Runner{}, dockerClient, github.Client{}, coveClient, deploy.Options{
-		Root: cfg.StagingPath,
-		Log:  os.Stderr,
+		Root:    cfg.StagingPath,
+		Storage: cfg.StoragePath,
+		Policy:  rules,
+		Log:     os.Stderr,
 	})
 	commits := github.Client{HTTP: &http.Client{Timeout: 30 * time.Second}}
 	orch := orchestrator.New(db, commits, deployer, secrets.GitHubToken)

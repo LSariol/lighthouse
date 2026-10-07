@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -90,6 +91,11 @@ type fakeCompose struct {
 	buildErr error
 	upErr    error
 	buildOut string
+	// config is the compose config the checks read; a plain one if "".
+	config   string
+	stageErr error
+
+	stages []string // Dockerfiles whose test stage was built
 
 	mu     sync.Mutex
 	builds []string // dirs
@@ -103,7 +109,28 @@ func (f *fakeCompose) Inspect(ctx context.Context, dir string) (compose.Project,
 	if name == "" {
 		name = filepath.Base(dir)
 	}
-	return compose.Project{Name: name, Services: f.services}, nil
+	// Built services are built from the folder, as Compose reports them.
+	services := append([]compose.Service(nil), f.services...)
+	for i := range services {
+		if services[i].Build {
+			services[i].Context = dir
+			services[i].Dockerfile = filepath.Join(dir, "Dockerfile")
+		}
+	}
+	config := f.config
+	if config == "" {
+		context, _ := json.Marshal(dir)
+		config = `{"services": {"web": {"build": {"context": ` + string(context) + `}}}}`
+	}
+	return compose.Project{Name: name, Services: services, Config: []byte(config)}, nil
+}
+
+func (f *fakeCompose) BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error {
+	f.mu.Lock()
+	f.stages = append(f.stages, dockerfile)
+	f.mu.Unlock()
+	io.WriteString(out, "running tests\n")
+	return f.stageErr
 }
 
 func (f *fakeCompose) Variables(ctx context.Context, dir string) ([]compose.Variable, error) {
@@ -139,6 +166,7 @@ type fakeDocker struct {
 	details    map[string]docker.Detail
 	tags       map[string]string // ref → image ID
 	pruned     int
+	names      []docker.NetworkName // on spark
 }
 
 func newFakeDocker() *fakeDocker {
@@ -162,6 +190,9 @@ func (f *fakeDocker) ProjectContainers(ctx context.Context, project string) ([]d
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]docker.Container(nil), f.containers[project]...), nil
+}
+func (f *fakeDocker) NetworkNames(ctx context.Context, network string) ([]docker.NetworkName, error) {
+	return f.names, nil
 }
 func (f *fakeDocker) Inspect(ctx context.Context, id string) (docker.Detail, error) {
 	f.mu.Lock()
@@ -269,7 +300,7 @@ func TestFirstDeploy(t *testing.T) {
 	if res.ComposeProject != "website" || claimed != "website" {
 		t.Errorf("compose project %q, claimed %q", res.ComposeProject, claimed)
 	}
-	want := "fetch=succeeded inspect=succeeded secrets=succeeded build=succeeded swap=succeeded verify=succeeded cleanup=succeeded"
+	want := "fetch=succeeded inspect=succeeded check=succeeded test=succeeded secrets=succeeded build=succeeded swap=succeeded verify=succeeded cleanup=succeeded"
 	if got := stepStatuses(res); got != want {
 		t.Errorf("steps: %s", got)
 	}
@@ -294,7 +325,7 @@ func TestFirstDeploy(t *testing.T) {
 	}
 
 	// The secret is hidden in the stored output and in the log.
-	build := res.Steps[3]
+	build := res.Steps[5]
 	if strings.Contains(build.Log, "hunter22") || !strings.Contains(build.Log, hidden) {
 		t.Errorf("build log: %q", build.Log)
 	}
@@ -317,6 +348,7 @@ func TestFirstDeploy(t *testing.T) {
 func TestNoComposeName(t *testing.T) {
 	e := newEnv(t)
 	e.compose.name = ""
+	e.compose.vars = []compose.Variable{{Name: "LANDING_DATABASE_URL"}} // its own keys, by the repository's name
 	e.compose.up = func(dir string) {
 		e.docker.set("landing", "web", "w", "i", healthy)
 		e.docker.set("landing", "db", "d", "p", running)

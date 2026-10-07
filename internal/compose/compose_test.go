@@ -76,6 +76,12 @@ func TestInspect(t *testing.T) {
 	if web.ImageName("plop") != "plop-web" || db.ImageName("plop") != "postgres:16" {
 		t.Errorf("image names: %s, %s", web.ImageName("plop"), db.ImageName("plop"))
 	}
+	if web.Context != dir || web.Dockerfile != filepath.Join(dir, "Dockerfile") || db.Context != "" {
+		t.Errorf("build: context %q, Dockerfile %q", web.Context, web.Dockerfile)
+	}
+	if !strings.Contains(string(p.Config), `"services"`) {
+		t.Errorf("Config isn't the compose config: %.80s", p.Config)
+	}
 
 	// With `name:`, that's the name.
 	writeCompose(t, dir, "name: website\n"+sample)
@@ -165,5 +171,28 @@ services:
 	}
 	if ids, _ := exec.Command("docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+project).Output(); len(strings.TrimSpace(string(ids))) > 0 {
 		t.Error("Down left containers behind")
+	}
+}
+
+func TestBuildStage(t *testing.T) {
+	needDaemon(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	dir := t.TempDir()
+	dockerfile := filepath.Join(dir, "Dockerfile")
+	write := func(test string) {
+		os.WriteFile(dockerfile, []byte("FROM alpine:3.24 AS base\nFROM base AS test\nRUN "+test+"\nFROM base\n"), 0o644)
+	}
+
+	var out bytes.Buffer
+	write("echo tests pass")
+	if err := (Runner{}).BuildStage(ctx, dir, dockerfile, "test", &out); err != nil {
+		t.Fatalf("a passing test stage: %v\n%s", err, out.String())
+	}
+	write("echo a test failed && exit 1")
+	err := Runner{}.BuildStage(ctx, dir, dockerfile, "test", &out)
+	if err == nil || !strings.Contains(err.Error(), "--target test failed") {
+		t.Errorf("a failing test stage: %v", err)
 	}
 }

@@ -20,9 +20,11 @@ import (
 	"github.com/lsariol/lighthouse/internal/projects"
 )
 
-// Deployer deploys a project. *deploy.Deployer implements it.
+// Deployer deploys a project, or checks it without deploying.
+// *deploy.Deployer implements it.
 type Deployer interface {
 	Deploy(ctx context.Context, req deploy.Request) deploy.Result
+	Check(ctx context.Context, req deploy.Request) deploy.Result
 }
 
 // Commits finds a repository's latest commit. github.Client implements it.
@@ -155,6 +157,39 @@ func (o *Orchestrator) Deploy(ctx context.Context, name string) error {
 		return err
 	}
 	return o.deploy(ctx, p, sha, projects.TriggerManual)
+}
+
+// Check runs the project's latest commit through the deploy's checks (fetch,
+// inspect, the rules, the test stage) without deploying or recording it. It
+// returns the commit it checked.
+func (o *Orchestrator) Check(ctx context.Context, name string) (deploy.Result, string, error) {
+	p, err := o.store.Get(ctx, name)
+	if err != nil {
+		return deploy.Result{}, "", err
+	}
+	sha, err := o.commits.LatestCommit(ctx, p.Repo, o.gitToken)
+	if err != nil {
+		return deploy.Result{}, "", err
+	}
+	res := o.deployer.Check(ctx, deploy.Request{
+		Project: p,
+		SHA:     sha,
+		Token:   o.gitToken,
+		// Only look: is the compose project another project's?
+		Claim: func(ctx context.Context, composeProject string) error {
+			list, err := o.store.List(ctx)
+			if err != nil {
+				return err
+			}
+			for _, other := range list {
+				if other.Name != p.Name && other.ComposeProject == composeProject {
+					return o.takenError(ctx, composeProject)
+				}
+			}
+			return nil
+		},
+	})
+	return res, sha, nil
 }
 
 // Retry clears a project's failures (and broken state) and deploys it now.

@@ -18,6 +18,9 @@ services:
       # relative bind mount in a project's compose file means the same files
       # to Compose (in this container) and to Docker (on the host).
       - STAGING_PATH=/srv/server/staging
+      # The projects' data folders: a project may mount host paths from
+      # its own folder here, <compose project>/, and nowhere else.
+      - STORAGE_PATH=/srv/server/storage
     volumes:
       # Lighthouse's Cove token (written on first start by the bootstrap).
       - type: bind
@@ -27,6 +30,12 @@ services:
       - type: bind
         source: /srv/server/staging
         target: /srv/server/staging
+      # The projects' data folders, read-only and at the same path, so the
+      # deploy rules can follow a symlink a container left in its folder.
+      - type: bind
+        source: /srv/server/storage
+        target: /srv/server/storage
+        read_only: true
       # Full control of the host's Docker: how Lighthouse deploys projects.
       - type: bind
         source: /var/run/docker.sock
