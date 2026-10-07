@@ -61,7 +61,7 @@ func scanProject(row pgx.Row) (projects.Project, error) {
 func (d *Database) List(ctx context.Context) ([]projects.Project, error) {
 	rows, err := d.pool.Query(ctx, `SELECT `+projectColumns+` FROM lighthouse.projects ORDER BY lower(name)`)
 	if err != nil {
-		return nil, fmt.Errorf("list projects: %w", err)
+		return nil, fmt.Errorf("database: list projects: %w", err)
 	}
 	defer rows.Close()
 
@@ -69,7 +69,7 @@ func (d *Database) List(ctx context.Context) ([]projects.Project, error) {
 	for rows.Next() {
 		p, err := scanProject(rows)
 		if err != nil {
-			return nil, fmt.Errorf("list projects: %w", err)
+			return nil, fmt.Errorf("database: list projects: %w", err)
 		}
 		list = append(list, p)
 	}
@@ -83,7 +83,7 @@ func (d *Database) Get(ctx context.Context, name string) (projects.Project, erro
 		return projects.Project{}, projects.ErrNotFound
 	}
 	if err != nil {
-		return projects.Project{}, fmt.Errorf("get project %q: %w", name, err)
+		return projects.Project{}, fmt.Errorf("database: get project %q: %w", name, err)
 	}
 	return p, nil
 }
@@ -167,7 +167,7 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 			return projects.ErrNotFound
 		}
 		if err != nil {
-			return fmt.Errorf("record deployment: %w", err)
+			return fmt.Errorf("database: record deployment: %w", err)
 		}
 
 		var depID int64
@@ -177,7 +177,7 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 			RETURNING id`,
 			id, dep.SHA, dep.Version, dep.Trigger, dep.Status, dep.FailureKind, dep.FailedStep, dep.StartedAt, dep.FinishedAt, errText).Scan(&depID)
 		if err != nil {
-			return fmt.Errorf("record deployment: %w", err)
+			return fmt.Errorf("database: record deployment: %w", err)
 		}
 
 		for i, st := range dep.Steps {
@@ -185,7 +185,7 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 				(deployment_id, position, step, status, started_at, finished_at, log)
 				VALUES ($1, $2, $3, $4, $5, $6, nullif($7, ''))`,
 				depID, i+1, st.Name, st.Status, st.StartedAt, st.FinishedAt, projects.LogText(st.Log)); err != nil {
-				return fmt.Errorf("record deployment step %s: %w", st.Name, err)
+				return fmt.Errorf("database: record deployment step %s: %w", st.Name, err)
 			}
 		}
 
@@ -209,7 +209,7 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 				id, errText, dep.FinishedAt)
 		}
 		if err != nil {
-			return fmt.Errorf("record deployment: %w", err)
+			return fmt.Errorf("database: record deployment: %w", err)
 		}
 		return nil
 	})
@@ -232,7 +232,7 @@ func (d *Database) deployments(ctx context.Context, p projects.Project, limit in
 		ORDER BY d.started_at DESC, d.id DESC
 		LIMIT $2 OFFSET $3`, p.Name, limit, offset)
 	if err != nil {
-		return nil, nil, fmt.Errorf("history of %q: %w", p.Name, err)
+		return nil, nil, fmt.Errorf("database: history of %q: %w", p.Name, err)
 	}
 	defer rows.Close()
 
@@ -243,7 +243,7 @@ func (d *Database) deployments(ctx context.Context, p projects.Project, limit in
 		var id int64
 		if err := rows.Scan(&id, &dep.SHA, &dep.Version, &dep.Trigger, &dep.Status, &dep.FailureKind, &dep.FailedStep,
 			&dep.StartedAt, &dep.FinishedAt, &dep.Error); err != nil {
-			return nil, nil, fmt.Errorf("history of %q: %w", p.Name, err)
+			return nil, nil, fmt.Errorf("database: history of %q: %w", p.Name, err)
 		}
 		list = append(list, dep)
 		ids = append(ids, id)
@@ -280,13 +280,13 @@ func (d *Database) Deployment(ctx context.Context, name string, n int) (projects
 	rows, err := d.pool.Query(ctx, `SELECT step, status, started_at, finished_at, coalesce(log, '')
 		FROM lighthouse.deployment_steps WHERE deployment_id = $1 ORDER BY position`, ids[0])
 	if err != nil {
-		return projects.Deployment{}, fmt.Errorf("steps of a deployment of %q: %w", p.Name, err)
+		return projects.Deployment{}, fmt.Errorf("database: steps of a deployment of %q: %w", p.Name, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var st projects.Step
 		if err := rows.Scan(&st.Name, &st.Status, &st.StartedAt, &st.FinishedAt, &st.Log); err != nil {
-			return projects.Deployment{}, fmt.Errorf("steps of a deployment of %q: %w", p.Name, err)
+			return projects.Deployment{}, fmt.Errorf("database: steps of a deployment of %q: %w", p.Name, err)
 		}
 		dep.Steps = append(dep.Steps, st)
 	}

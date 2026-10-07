@@ -41,7 +41,7 @@ func Migrate(ctx context.Context, connString string) error {
 		slog.Info("migration applied", "migration", r.Source.Path, "took", r.Duration.String())
 	}
 	if err != nil {
-		return fmt.Errorf("apply migrations: %w", err)
+		return fmt.Errorf("database: apply migrations: %w", err)
 	}
 	if len(results) == 0 {
 		slog.Info("database schema is up to date")
@@ -59,7 +59,7 @@ func PrintMigrationStatus(ctx context.Context, connString string, w io.Writer) e
 
 	statuses, err := provider.Status(ctx)
 	if err != nil {
-		return fmt.Errorf("migration status: %w", err)
+		return fmt.Errorf("database: migration status: %w", err)
 	}
 	for _, s := range statuses {
 		appliedAt := "-"
@@ -81,7 +81,7 @@ func newProvider(ctx context.Context, connString string) (*goose.Provider, *sql.
 	// schema that holds it has to exist first.
 	if _, err := db.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS lighthouse"); err != nil {
 		db.Close()
-		return nil, nil, fmt.Errorf("prepare migrations with LIGHTHOUSE_MIGRATOR_DATABASE_URL: %w", err)
+		return nil, nil, fmt.Errorf("database: prepare migrations with LIGHTHOUSE_MIGRATOR_DATABASE_URL: %w", err)
 	}
 
 	fsys, err := fs.Sub(embeddedMigrations, "migrations")
@@ -102,7 +102,7 @@ func newProvider(ctx context.Context, connString string) (*goose.Provider, *sql.
 	)
 	if err != nil {
 		db.Close()
-		return nil, nil, fmt.Errorf("create migration provider: %w", err)
+		return nil, nil, fmt.Errorf("database: prepare migrations: %w", err)
 	}
 	return provider, db, nil
 }
@@ -121,7 +121,7 @@ func (d *Database) SchemaVersion(ctx context.Context) (have int64, want int64, e
 		if errors.As(err, &pgErr) && pgErr.Code == undefinedTable {
 			return 0, want, nil
 		}
-		return 0, want, fmt.Errorf("read the schema version: %w", err)
+		return 0, want, fmt.Errorf("database: read the schema version: %w", err)
 	}
 	return have, want, nil
 }

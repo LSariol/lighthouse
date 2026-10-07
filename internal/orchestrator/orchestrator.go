@@ -196,7 +196,7 @@ func (o *Orchestrator) Scan(ctx context.Context) error {
 	}
 
 	if len(failed) > 0 {
-		return fmt.Errorf("failed: %s", strings.Join(failed, ", "))
+		return fmt.Errorf("checks failed for %s (each project's error is logged, and shown by \"list\")", strings.Join(failed, ", "))
 	}
 	return nil
 }
@@ -604,7 +604,9 @@ func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target,
 	}
 	o.recordDeployment(ctx, d)
 	if s := res.Settings; s.Tier != "" && (s.Deploy != p.Mode || s.Tier != p.Tier) {
-		o.store.SetSettings(context.WithoutCancel(ctx), p.Name, s.Deploy, s.Tier)
+		if err := o.store.SetSettings(context.WithoutCancel(ctx), p.Name, s.Deploy, s.Tier); err != nil && !errors.Is(err, projects.ErrNotFound) {
+			slog.Error("recording a project's x-lighthouse settings failed", "project", p.Name, "err", err)
+		}
 	}
 
 	w := o.watchOf(p.Name)

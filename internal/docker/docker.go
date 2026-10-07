@@ -37,7 +37,7 @@ type Client struct {
 func New() (*Client, error) {
 	api, err := client.New(client.FromEnv)
 	if err != nil {
-		return nil, fmt.Errorf("Docker client: %w", err)
+		return nil, fmt.Errorf("Docker: connect: %w", err)
 	}
 	return &Client{api: api}, nil
 }
@@ -69,7 +69,7 @@ func (c *Client) ProjectContainers(ctx context.Context, project string) ([]Conta
 		Filters: client.Filters{}.Add("label", projectLabel+"="+project),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list containers of %s: %w", project, err)
+		return nil, fmt.Errorf("Docker: list containers of %s: %w", project, err)
 	}
 
 	containers := make([]Container, 0, len(result.Items))
@@ -109,11 +109,11 @@ func (c *Client) SelfProject(ctx context.Context) (string, error) {
 	}
 	host, err := os.Hostname()
 	if err != nil {
-		return "", fmt.Errorf("find Lighthouse's own container: %w", err)
+		return "", fmt.Errorf("Docker: find Lighthouse's own container: %w", err)
 	}
 	info, err := c.api.ContainerInspect(ctx, host, client.ContainerInspectOptions{})
 	if err != nil {
-		return "", fmt.Errorf("find Lighthouse's own container (hostname %q): %w", host, err)
+		return "", fmt.Errorf("Docker: find Lighthouse's own container (hostname %q): %w", host, err)
 	}
 	if info.Container.Config == nil {
 		return "", nil
@@ -137,7 +137,7 @@ func (c *Client) NetworkNames(ctx context.Context, network string) ([]NetworkNam
 		Filters: client.Filters{}.Add("network", network),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list containers on %s: %w", network, err)
+		return nil, fmt.Errorf("Docker: list containers on %s: %w", network, err)
 	}
 
 	var names []NetworkName
@@ -147,7 +147,7 @@ func (c *Client) NetworkNames(ctx context.Context, network string) ([]NetworkNam
 			continue // removed meanwhile
 		}
 		if err != nil {
-			return nil, fmt.Errorf("inspect %s: %w", s.ID, err)
+			return nil, fmt.Errorf("Docker: inspect container %.12s: %w", s.ID, err)
 		}
 		ct := info.Container
 		container := strings.TrimPrefix(ct.Name, "/")
@@ -219,7 +219,7 @@ type Detail struct {
 func (c *Client) Inspect(ctx context.Context, id string) (Detail, error) {
 	result, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
-		return Detail{}, fmt.Errorf("inspect %s: %w", id, err)
+		return Detail{}, fmt.Errorf("Docker: inspect container %.12s: %w", id, err)
 	}
 	info := result.Container
 	var d Detail
@@ -239,18 +239,24 @@ func (c *Client) Inspect(ctx context.Context, id string) (Detail, error) {
 }
 
 func (c *Client) Start(ctx context.Context, id string) error {
-	_, err := c.api.ContainerStart(ctx, id, client.ContainerStartOptions{})
-	return err
+	if _, err := c.api.ContainerStart(ctx, id, client.ContainerStartOptions{}); err != nil {
+		return fmt.Errorf("Docker: start container %.12s: %w", id, err)
+	}
+	return nil
 }
 
 func (c *Client) Stop(ctx context.Context, id string) error {
-	_, err := c.api.ContainerStop(ctx, id, client.ContainerStopOptions{})
-	return err
+	if _, err := c.api.ContainerStop(ctx, id, client.ContainerStopOptions{}); err != nil {
+		return fmt.Errorf("Docker: stop container %.12s: %w", id, err)
+	}
+	return nil
 }
 
 func (c *Client) Restart(ctx context.Context, id string) error {
-	_, err := c.api.ContainerRestart(ctx, id, client.ContainerRestartOptions{})
-	return err
+	if _, err := c.api.ContainerRestart(ctx, id, client.ContainerRestartOptions{}); err != nil {
+		return fmt.Errorf("Docker: restart container %.12s: %w", id, err)
+	}
+	return nil
 }
 
 // Logs returns the last tail lines of a container's output, stdout and
@@ -262,13 +268,13 @@ func (c *Client) Logs(ctx context.Context, id string, tail int) (string, error) 
 		Tail:       strconv.Itoa(tail),
 	})
 	if err != nil {
-		return "", fmt.Errorf("logs %s: %w", id, err)
+		return "", fmt.Errorf("Docker: read the logs of container %.12s: %w", id, err)
 	}
 	defer rc.Close()
 
 	var output bytes.Buffer
 	if _, err := stdcopy.StdCopy(&output, &output, rc); err != nil && err != io.EOF {
-		return "", fmt.Errorf("logs %s: read: %w", id, err)
+		return "", fmt.Errorf("Docker: read the logs of container %.12s: %w", id, err)
 	}
 	return output.String(), nil
 }
@@ -280,7 +286,7 @@ func (c *Client) ImageID(ctx context.Context, ref string) (string, error) {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("inspect image %s: %w", ref, err)
+		return "", fmt.Errorf("Docker: inspect image %s: %w", ref, err)
 	}
 	return result.ID, nil
 }
@@ -288,7 +294,7 @@ func (c *Client) ImageID(ctx context.Context, ref string) (string, error) {
 // Tag gives the image source (an ID or a name) the name target.
 func (c *Client) Tag(ctx context.Context, source string, target string) error {
 	if _, err := c.api.ImageTag(ctx, client.ImageTagOptions{Source: source, Target: target}); err != nil {
-		return fmt.Errorf("tag %s as %s: %w", source, target, err)
+		return fmt.Errorf("Docker: tag %s as %s: %w", source, target, err)
 	}
 	return nil
 }
@@ -300,7 +306,7 @@ func (c *Client) Tags(ctx context.Context, repository string, prefix string) ([]
 		Filters: client.Filters{}.Add("reference", repository+":"+prefix+"*"),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list images of %s: %w", repository, err)
+		return nil, fmt.Errorf("Docker: list images of %s: %w", repository, err)
 	}
 	var tags []string
 	for _, img := range result.Items {
@@ -318,7 +324,7 @@ func (c *Client) Tags(ctx context.Context, repository string, prefix string) ([]
 func (c *Client) Untag(ctx context.Context, ref string) error {
 	_, err := c.api.ImageRemove(ctx, ref, client.ImageRemoveOptions{})
 	if err != nil && !IsNotFound(err) {
-		return fmt.Errorf("remove %s: %w", ref, err)
+		return fmt.Errorf("Docker: remove %s: %w", ref, err)
 	}
 	return nil
 }

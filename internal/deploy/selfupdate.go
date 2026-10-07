@@ -113,7 +113,9 @@ func (r *run) handOff(ctx context.Context, project compose.Project, dir string, 
 	}
 
 	// A helper left from the last update (stopped) is removed first.
-	r.d.compose.RemoveContainer(ctx, HelperName)
+	if err := r.d.compose.RemoveContainer(ctx, HelperName); err != nil {
+		fmt.Fprintf(out, "! remove the last update's helper: %v\n", err)
+	}
 	fmt.Fprintf(out, "starting the update helper (%s) from %s\n", HelperName, image)
 	err := r.d.compose.RunDetached(ctx, HelperName, image,
 		[]string{"/var/run/docker.sock:/var/run/docker.sock", r.d.root + ":" + r.d.root},

@@ -99,9 +99,9 @@ func TestLatestCommit(t *testing.T) {
 		temporary bool
 	}{
 		{"empty", "t", "no commits", false},
-		{"weird", "t", "unexpected response", false},
-		{"missing", "t", "404", false},
-		{"good", "wrong", "Bad credentials", false},
+		{"weird", "t", "check o/weird for its newest commit: unexpected answer", false},
+		{"missing", "t", "404 Not Found (Not Found). The repository, commit or file doesn't exist, or Lighthouse's token can't read it", false},
+		{"good", "wrong", "Bad credentials). Lighthouse's GitHub token (LIGHTHOUSE_GITHUB_TOKEN in Cove) was rejected", false},
 		{"down", "t", "502", true},
 		{"limited", "t", "rate limit", true},
 	}

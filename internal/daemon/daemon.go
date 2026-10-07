@@ -544,7 +544,7 @@ func (d *Daemon) targets(ctx context.Context, target string) (projects.Project, 
 
 	all, err := d.containers.ProjectContainers(ctx, p.ComposeName())
 	if err != nil {
-		return p, nil, fmt.Errorf("Docker: %w", err)
+		return p, nil, err
 	}
 	if len(all) == 0 {
 		return p, nil, control.Errorf(control.KindNotFound, "%s has no containers (compose project %q). \"deploy %s\" starts it.", p.Name, p.ComposeName(), p.Name)

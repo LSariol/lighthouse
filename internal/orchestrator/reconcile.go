@@ -68,7 +68,7 @@ func (o *Orchestrator) Reconcile(ctx context.Context) error {
 	}
 
 	if len(failed) > 0 {
-		return fmt.Errorf("failed: %s", strings.Join(failed, ", "))
+		return fmt.Errorf("couldn't bring back %s (each project's error is logged)", strings.Join(failed, ", "))
 	}
 	return nil
 }

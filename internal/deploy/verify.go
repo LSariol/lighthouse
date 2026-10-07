@@ -54,7 +54,7 @@ func (r *run) verify(ctx context.Context, project compose.Project, out io.Writer
 func (r *run) checkServices(ctx context.Context, project compose.Project, stableSince map[string]time.Time, restarts map[string]int) ([]string, *failure) {
 	containers, err := r.d.docker.ProjectContainers(ctx, project.Name)
 	if err != nil {
-		return nil, transient(fmt.Errorf("Docker: %w", err))
+		return nil, transient(err)
 	}
 	byService := map[string][]docker.Container{}
 	for _, c := range containers {
@@ -71,7 +71,7 @@ func (r *run) checkServices(ctx context.Context, project compose.Project, stable
 		for _, c := range cs {
 			d, err := r.d.docker.Inspect(ctx, c.ID)
 			if err != nil {
-				return nil, transient(fmt.Errorf("Docker: %w", err))
+				return nil, transient(err)
 			}
 			if _, seen := restarts[c.ID]; !seen {
 				restarts[c.ID] = d.RestartCount
@@ -137,7 +137,9 @@ func (r *run) cleanup(ctx context.Context, project compose.Project, dir string, 
 	var removed []string
 	for _, e := range entries {
 		if e.IsDir() && !keep[e.Name()] {
-			if err := os.RemoveAll(filepath.Join(filepath.Dir(dir), e.Name())); err == nil {
+			if err := os.RemoveAll(filepath.Join(filepath.Dir(dir), e.Name())); err != nil {
+				fmt.Fprintf(out, "! remove the old deploy folder %s: %v\n", e.Name(), err)
+			} else {
 				removed = append(removed, e.Name())
 			}
 		}

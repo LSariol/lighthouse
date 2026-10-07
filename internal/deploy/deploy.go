@@ -593,7 +593,7 @@ func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (comp
 func (r *run) check(ctx context.Context, project compose.Project, dir string, keys []string, out io.Writer) *failure {
 	names, err := r.d.docker.NetworkNames(ctx, policy.SharedNetwork)
 	if err != nil {
-		return transient(fmt.Errorf("Docker: %w", err))
+		return transient(err)
 	}
 	taken := map[string]string{}
 	for _, n := range names {
@@ -661,7 +661,7 @@ func (r *run) fetchSecrets(ctx context.Context, keys []string, out io.Writer) ([
 	values, err := r.d.secrets.GetSecretsContext(ctx, keys...)
 	switch {
 	case errors.Is(err, coveclient.ErrNotFound), errors.Is(err, coveclient.ErrForbidden), errors.Is(err, coveclient.ErrInvalidKey):
-		return nil, permanent(fmt.Errorf("%w (create the keys in Cove, or fix their names in the compose file)", err))
+		return nil, permanent(fmt.Errorf("Cove: %w (create the keys in Cove, or fix their names in the compose file)", err))
 	case err != nil:
 		return nil, transient(fmt.Errorf("Cove: %w", err))
 	}
@@ -679,7 +679,7 @@ func (r *run) fetchSecrets(ctx context.Context, keys []string, out io.Writer) ([
 func (r *run) build(ctx context.Context, dir string, project compose.Project, env []string, out io.Writer) *failure {
 	running, err := r.d.docker.ProjectContainers(ctx, project.Name)
 	if err != nil {
-		return transient(fmt.Errorf("Docker: %w", err))
+		return transient(err)
 	}
 	r.previous = map[string]string{}
 	for _, c := range running {
@@ -688,7 +688,9 @@ func (r *run) build(ctx context.Context, dir string, project compose.Project, en
 	if prev := r.req.Project.DeployedSHA; prev != "" {
 		for _, s := range project.Services {
 			if id := r.previous[s.Name]; s.Build && id != "" {
-				r.d.docker.Tag(ctx, id, rollbackRef(s.ImageName(project.Name), prev))
+				if err := r.d.docker.Tag(ctx, id, rollbackRef(s.ImageName(project.Name), prev)); err != nil {
+					fmt.Fprintf(out, "! %v: a rollback of %s may not find its image\n", err, s.Name)
+				}
 			}
 		}
 	}
@@ -745,7 +747,7 @@ func (r *run) backup(ctx context.Context, project compose.Project, out io.Writer
 
 	containers, err := r.d.docker.ProjectContainers(ctx, project.Name)
 	if err != nil {
-		return transient(fmt.Errorf("Docker: %w", err))
+		return transient(err)
 	}
 	container := ""
 	for _, c := range containers {
