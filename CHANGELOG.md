@@ -32,6 +32,10 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 - `govulncheck` is clean (the old `docker/docker` and OpenTelemetry advisories are gone).
 
 ### Added
+- **Self-update.** Lighthouse watches its own repository (release tags) and deploys itself: the swap is handed to an update helper container (`lighthouse self-update`), which waits until the new Lighthouse is healthy (`lighthouse health`, now the container's healthcheck) and puts the old one back if it isn't. The result is recorded by whichever Lighthouse runs afterwards.
+- `rollback <name>`, and `deploy <name> <tag or commit>`: going back sticks (the branch's newest commit is held; migration `00005`).
+- Every deploy gives Compose `LIGHTHOUSE_DEPLOY_COMMIT` and `LIGHTHOUSE_DEPLOY_VERSION`.
+- Errors say where they come from: GitHub errors name the request and the usual cause (an expired token, a repository the token can't read), Docker, database and Cove errors are labelled, and errors that used to be dropped are reported.
 - **Release mode and tiers, set in the compose file.** An `x-lighthouse` block (`deploy: releases`, `tier: data|infra|app`, `backup: postgres`) is read from the default branch. A release-mode project deploys its newest version tag, and only one newer than any deployed before, so going back by hand sticks. `deploy <name> <version>` deploys a tag.
 - **One deploy at a time, in order:** data, then infra, then apps, for checks, the CLI and the reconcile loop alike.
 - **Backups before deploying a database** (`backup: postgres`): `pg_dumpall` to `BACKUP_PATH` (`/srv/backups`, mounted), the newest 5 kept; a failed backup stops the deploy. The previous version's secrets are fetched before every swap, so a rollback doesn't need Cove.

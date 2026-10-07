@@ -484,7 +484,10 @@ const failedGuide = `When a deploy fails
      GitHub: 401              Lighthouse's GitHub token expired or was revoked
 
 5. Fix it and push (it deploys on the next check), or, for a fix outside
-   the repository such as a secret in Cove: "retry <name>".`
+   the repository such as a secret in Cove: "retry <name>".
+
+6. A version that came up healthy but is wrong: "rollback <name>" goes
+   back to what ran before, and checks won't redeploy it.`
 
 // help shows the overview, one command in detail, or a guide.
 func (c *CLI) help(ctx context.Context, args []string) error {
