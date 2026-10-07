@@ -10,6 +10,9 @@
 //	test     the Dockerfile's test stage, if it has one
 //	secrets  fetch every ${KEY} without a default from Cove, in one request
 //	build    build the images; tag the running ones for rollback first
+//	backup   for a project with x-lighthouse backup: postgres, a pg_dumpall of
+//	         the running database; and the previous version's secrets, so a
+//	         rollback doesn't need Cove (whose database may be what's swapped)
 //	swap     docker compose up: the only moment of downtime
 //	verify   wait until every service is healthy (or stable); else roll back
 //	cleanup  old deploy folders, old rollback tags, unused images and cache
@@ -21,6 +24,7 @@
 package deploy
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -29,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +44,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/github"
 	"github.com/lsariol/lighthouse/internal/policy"
 	"github.com/lsariol/lighthouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/settings"
 )
 
 // Compose runs docker compose. compose.Runner implements it.
@@ -47,6 +53,7 @@ type Compose interface {
 	Variables(ctx context.Context, dir string) ([]compose.Variable, error)
 	Build(ctx context.Context, dir string, project string, env []string, out io.Writer) error
 	BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error
+	Exec(ctx context.Context, container string, command []string, stdout io.Writer) error
 	Up(ctx context.Context, dir string, project string, env []string, out io.Writer) error
 }
 
@@ -102,7 +109,10 @@ type Options struct {
 	// mount host paths from Storage/<compose project>/ (and its own files).
 	Storage string
 	// Policy holds the exceptions to the deploy rules (policy.json).
-	Policy   policy.Policy
+	Policy policy.Policy
+	// Backups is where database backups go: <Backups>/<compose project>/.
+	// The newest KeepBackups of each project are kept.
+	Backups  string
 	Timeouts Timeouts
 	// Log receives every step's output as it happens (secret values hidden).
 	// Nothing if nil.
@@ -119,6 +129,7 @@ type Deployer struct {
 	secrets  Secrets
 	root     string
 	storage  string
+	backups  string
 	policy   policy.Policy
 	timeouts Timeouts
 	log      io.Writer
@@ -149,7 +160,7 @@ func New(c Compose, d Docker, s Source, sec Secrets, opts Options) *Deployer {
 	if poll == 0 {
 		poll = 2 * time.Second
 	}
-	return &Deployer{compose: c, docker: d, source: s, secrets: sec, root: opts.Root, storage: opts.Storage, policy: opts.Policy,
+	return &Deployer{compose: c, docker: d, source: s, secrets: sec, root: opts.Root, storage: opts.Storage, backups: opts.Backups, policy: opts.Policy,
 		timeouts: t, log: log, poll: poll}
 }
 
@@ -157,6 +168,7 @@ func New(c Compose, d Docker, s Source, sec Secrets, opts Options) *Deployer {
 type Request struct {
 	Project projects.Project
 	SHA     string // the commit to deploy
+	Version string // the release it is (v1.2.3), or "" for a commit on the branch
 	Token   string // GitHub token, for the download
 
 	// Claim is called with the compose project the compose file names, before
@@ -172,8 +184,10 @@ type Result struct {
 	FailureKind    string // projects.FailureTransient or FailurePermanent, for a failure
 	FailedStep     string
 	ComposeProject string // as the compose file names it, once inspected
-	Steps          []projects.Step
-	Err            error // nil on success
+	// Settings are the commit's x-lighthouse settings, once inspected.
+	Settings settings.Settings
+	Steps    []projects.Step
+	Err      error // nil on success
 }
 
 // The steps, in order.
@@ -184,12 +198,13 @@ const (
 	StepTest    = "test"
 	StepSecrets = "secrets"
 	StepBuild   = "build"
+	StepBackup  = "backup"
 	StepSwap    = "swap"
 	StepVerify  = "verify"
 	StepCleanup = "cleanup"
 )
 
-var stepOrder = []string{StepFetch, StepInspect, StepCheck, StepTest, StepSecrets, StepBuild, StepSwap, StepVerify, StepCleanup}
+var stepOrder = []string{StepFetch, StepInspect, StepCheck, StepTest, StepSecrets, StepBuild, StepBackup, StepSwap, StepVerify, StepCleanup}
 
 // checkOrder are the steps Check runs.
 var checkOrder = stepOrder[:4]
@@ -212,6 +227,8 @@ type run struct {
 	scrub    *scrubber // hides secret values in output, once they're known
 	stepLog  *tail
 	previous map[string]string // service → image ID running before the swap
+	prevEnv  []string          // the previous version's secrets, fetched before the swap
+	settings settings.Settings // the commit's x-lighthouse settings
 	dry      bool              // Check: change nothing, stop after the test step
 }
 
@@ -282,6 +299,7 @@ func (r *run) deploy(ctx context.Context) Result {
 		return fail(StepInspect, f)
 	}
 	res.ComposeProject = project.Name
+	res.Settings = r.settings
 
 	if f := r.step(ctx, StepCheck, func(ctx context.Context, out io.Writer) *failure {
 		return r.check(ctx, project, dir, keys, out)
@@ -317,6 +335,13 @@ func (r *run) deploy(ctx context.Context) Result {
 	}); f != nil {
 		r.removeUnlessCurrent(dir)
 		return fail(StepBuild, f)
+	}
+
+	if f := r.step(ctx, StepBackup, func(ctx context.Context, out io.Writer) *failure {
+		return r.backup(ctx, project, out)
+	}); f != nil {
+		r.removeUnlessCurrent(dir)
+		return fail(StepBackup, f)
 	}
 
 	// From here the running version is replaced: shutting Lighthouse down
@@ -505,6 +530,14 @@ func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (comp
 		project.Services, project.Config = moved.Services, moved.Config
 	}
 
+	r.settings, err = settings.FromConfig(project.Config)
+	if err != nil {
+		return project, dir, nil, permanent(err)
+	}
+	if r.settings != settings.Default {
+		fmt.Fprintf(out, "x-lighthouse: deploy %s, tier %s, backup %s\n", r.settings.Deploy, r.settings.Tier, orNone(r.settings.Backup))
+	}
+
 	vars, err := r.d.compose.Variables(ctx, dir)
 	if err != nil {
 		return project, dir, nil, permanent(fmt.Errorf("the compose file's variables can't be read: %w", err))
@@ -599,7 +632,7 @@ func (r *run) fetchSecrets(ctx context.Context, keys []string, out io.Writer) ([
 		return nil, transient(fmt.Errorf("Cove: %w", err))
 	}
 
-	r.scrub = newScrubber(values, r.scrub.out...)
+	r.scrub.add(values)
 	env := make([]string, 0, len(values))
 	for _, k := range keys {
 		env = append(env, k+"="+values[k])
@@ -641,6 +674,116 @@ func (r *run) build(ctx context.Context, dir string, project compose.Project, en
 	return nil
 }
 
+// KeepBackups is how many backups of each project are kept.
+const KeepBackups = 5
+
+// backup prepares for the swap. It fetches the previous version's secrets,
+// so a rollback doesn't need Cove: Cove's database may be what's being
+// swapped. And for a project with backup: postgres, it dumps the running
+// database (pg_dumpall) to <backups>/<compose project>/; if that fails, the
+// deploy stops.
+func (r *run) backup(ctx context.Context, project compose.Project, out io.Writer) *failure {
+	if prevDir := r.currentDir(project.Name); prevDir != "" && len(r.previous) > 0 {
+		env, f := r.fetchSecretsFor(ctx, prevDir, out)
+		if f != nil {
+			fmt.Fprintf(out, "! the previous version's secrets couldn't be fetched now (%v); a rollback will try again\n", f.err)
+		} else {
+			r.prevEnv = append([]string{}, env...)
+		}
+	}
+
+	if r.settings.Backup != settings.BackupPostgres {
+		fmt.Fprintln(out, "no backup (x-lighthouse backup: postgres dumps a database before each deploy)")
+		return nil
+	}
+	service := ""
+	for _, s := range project.Services {
+		if s.Image == "postgres" || strings.HasPrefix(s.Image, "postgres:") || strings.HasPrefix(s.Image, "postgres@") {
+			if service != "" {
+				return permanent(errors.New("backup: postgres needs exactly one service with a postgres image, and there are several"))
+			}
+			service = s.Name
+		}
+	}
+	if service == "" {
+		return permanent(errors.New("backup: postgres needs a service with a postgres image (postgres:17)"))
+	}
+
+	containers, err := r.d.docker.ProjectContainers(ctx, project.Name)
+	if err != nil {
+		return transient(fmt.Errorf("Docker: %w", err))
+	}
+	container := ""
+	for _, c := range containers {
+		if c.Service == service && c.State == "running" {
+			container = c.Name
+		}
+	}
+	if container == "" {
+		fmt.Fprintf(out, "! %s isn't running, so there's nothing to back up\n", service)
+		return nil
+	}
+
+	if r.d.backups == "" {
+		return transient(errors.New("backup: no backup folder is set (BACKUP_PATH)"))
+	}
+	dir := filepath.Join(r.d.backups, project.Name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return transient(fmt.Errorf("backup: %w", err))
+	}
+	name := filepath.Join(dir, fmt.Sprintf("%s-%s-%s.sql.gz", project.Name, time.Now().UTC().Format("20060102-150405"), short12(r.req.SHA)))
+	fmt.Fprintf(out, "backing up %s (pg_dumpall) to %s\n", container, name)
+	if err := dump(ctx, r.d.compose, container, name); err != nil {
+		os.Remove(name)
+		return transient(fmt.Errorf("backup: %w", err))
+	}
+	if info, err := os.Stat(name); err == nil {
+		fmt.Fprintf(out, "backed up: %d KB\n", info.Size()>>10)
+	}
+	pruneBackups(dir, KeepBackups, out)
+	return nil
+}
+
+// dump writes pg_dumpall's output, gzipped, to a new file only its owner can
+// read: it holds every role's password hash.
+func dump(ctx context.Context, c Compose, container string, path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	gz := gzip.NewWriter(f)
+	err = c.Exec(ctx, container, []string{"sh", "-c", `pg_dumpall -U "$POSTGRES_USER"`}, gz)
+	if closeErr := gz.Close(); err == nil {
+		err = closeErr
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// pruneBackups keeps the newest keep backups in dir (their names sort by
+// time).
+func pruneBackups(dir string, keep int, out io.Writer) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql.gz") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for len(names) > keep {
+		if err := os.Remove(filepath.Join(dir, names[0])); err == nil {
+			fmt.Fprintf(out, "removed the old backup %s\n", names[0])
+		}
+		names = names[1:]
+	}
+}
+
 // rollBack restores the version that ran before: its images under their
 // usual names, then docker compose up from its folder. res is the failure
 // that caused it.
@@ -668,9 +811,12 @@ func (r *run) rollBack(ctx context.Context, res Result, project compose.Project,
 				}
 			}
 		}
-		env, f := r.fetchSecretsFor(ctx, prevDir, out)
-		if f != nil {
-			return f
+		env := r.prevEnv
+		if env == nil {
+			var f *failure
+			if env, f = r.fetchSecretsFor(ctx, prevDir, out); f != nil {
+				return f
+			}
 		}
 		if err := r.d.compose.Up(ctx, prevDir, project.Name, env, out); err != nil {
 			return permanent(err)
@@ -747,6 +893,13 @@ func serviceNames(p compose.Project) string {
 		names[i] = s.Name
 	}
 	return strings.Join(names, ", ")
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 
 func short(sha string) string {

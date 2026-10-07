@@ -166,6 +166,13 @@ services:
 	if err != nil || strings.TrimSpace(string(got)) != "s3cret" {
 		t.Errorf("the secret in the container: %q, %v", got, err)
 	}
+	var dump bytes.Buffer
+	if err := r.Exec(ctx, project+"-app-1", []string{"sh", "-c", `echo "dump of $SECRET"`}, &dump); err != nil || dump.String() != "dump of s3cret\n" {
+		t.Errorf("Exec = %q, %v", dump.String(), err)
+	}
+	if err := r.Exec(ctx, project+"-app-1", []string{"sh", "-c", "echo broken >&2; exit 3"}, &dump); err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Errorf("a failing Exec = %v", err)
+	}
 	if err := r.Down(ctx, t.TempDir(), project, &out); err != nil {
 		t.Fatalf("Down: %v\n%s", err, out.String())
 	}

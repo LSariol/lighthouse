@@ -22,9 +22,13 @@ func (c *CLI) list(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	rows := [][]string{{"NAME", "REPOSITORY", "COMMIT", "DEPLOYED", "CHECKED"}}
+	rows := [][]string{{"NAME", "REPOSITORY", "DEPLOYS", "RUNNING", "DEPLOYED", "CHECKED"}}
 	for _, p := range projects {
-		rows = append(rows, []string{p.Name, p.URL, shortSHA(p.Commit), formatTime(p.LastDeployed), formatTime(p.LastChecked)})
+		running := deployed(p.Version, p.Commit)
+		if p.Stopped {
+			running += ", stopped"
+		}
+		rows = append(rows, []string{p.Name, p.URL, follows(p.Mode, p.Tier), running, formatTime(p.LastDeployed), formatTime(p.LastChecked)})
 	}
 	table(rows)
 	info(fmt.Sprintf("%d %s", len(projects), plural(len(projects), "project", "projects")))

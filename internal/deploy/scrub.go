@@ -36,6 +36,18 @@ func newScrubber(secrets map[string]string, out ...io.Writer) *scrubber {
 	return s
 }
 
+// add hides more values from now on.
+func (s *scrubber) add(secrets map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range secrets {
+		if len(v) >= minSecretLength {
+			s.secrets = append(s.secrets, v)
+		}
+	}
+	sort.Slice(s.secrets, func(i, j int) bool { return len(s.secrets[i]) > len(s.secrets[j]) })
+}
+
 func (s *scrubber) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

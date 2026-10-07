@@ -6,7 +6,7 @@ The complete reference for **Lighthouse**, the self-hosted deployer for the `spa
 - [Cove](https://github.com/LSariol/Cove): the secret vault Lighthouse reads from. Its `DOCUMENTATION.md` §9 (connecting a project), §10 (bootstrap) and §14 (operations) are the other half of this document.
 - [CoveClient](https://github.com/LSariol/CoveClient): the Go library Lighthouse uses to talk to Cove.
 
-> **Status.** This document describes `release/1.0.0` after steps 1–4 of [§16.8](#168-order-of-work): the foundation, the database, the deploy pipeline (build first, swap last, roll back; compose projects with several services), and the checks (the deploy rules and test stages). Sections 1–13 describe what the code **does today**. Section 14 lists the standards every change must follow. Sections 15–17 list what is still wrong and what v1.0.0 will look like.
+> **Status.** This document describes `release/1.0.0` after steps 1–5 of [§16.8](#168-order-of-work): the foundation, the database, the deploy pipeline (build first, swap last, roll back; compose projects with several services), the checks (the deploy rules and test stages), and the orchestrator (release mode, tiers, backups, ETag polling, waits after failures, the reconcile loop). Sections 1–13 describe what the code **does today**. Section 14 lists the standards every change must follow. Sections 15–17 list what is still wrong and what v1.0.0 will look like.
 
 ---
 
@@ -36,7 +36,7 @@ The complete reference for **Lighthouse**, the self-hosted deployer for the `spa
 
 Lighthouse keeps the server's projects running the latest code on their default branch. It is one Go program running in a Docker container next to the projects it manages.
 
-Every 10 seconds (configurable) it asks GitHub for the newest commit of each watched repository. When the commit changes, it deploys it, **building first and swapping last**:
+Every 10 seconds (configurable) it asks GitHub for the newest commit of each watched repository (or, for a project that deploys releases, its newest version tag). When it changes, it deploys it, **building first and swapping last**:
 
 1. downloads that exact commit and unpacks it,
 2. reads its compose file: the compose project's name, its services, the `${KEY}` secrets it needs,
@@ -192,18 +192,33 @@ A fatal error after the socket is open (for example a revoked Cove token) exits 
 
 ### 4.2 The check loop
 
-Unless paused, every `LIGHTHOUSE_POLL_INTERVAL`, `Scan` checks each project in turn:
+Unless paused, every `LIGHTHOUSE_POLL_INTERVAL`, `Scan` checks each project in turn, **data projects first, then infra, then apps** (their `x-lighthouse` tier, [§7.2](#72-lighthouse-settings-x-lighthouse)):
 
 ```
-GET /repos/<owner>/<repo>/commits?per_page=1   (Authorization: Bearer <token>)
-  ├─ error / non-200 / no commits → that project's last error; go on to the next one
+skip it if it was stopped on purpose (stop <name>), or is waiting after a passing failure
+
+GET /repos/<owner>/<repo>/commits?per_page=1   (If-None-Match: the last ETag)
+  ├─ 304 Not Modified → the same commit as last time (costs nothing against the rate limit)
+  ├─ error            → that project's last error, and a wait (below); go on to the next one
   └─ sha = the newest commit on the default branch
 
-sha == the deployed commit                  → nothing to do; the last error is cleared
-project broken and sha == the failing commit → not tried again (no error for the scan)
-otherwise                                    → deploy it (§4.3), trigger "check"
+the branch moved → read its compose file (GET …/contents/compose.yaml?ref=<sha>) for x-lighthouse
+
+branch mode (the default):
+  sha == the deployed commit → nothing to do
+  otherwise                  → deploy sha
+release mode (deploy: releases):
+  GET /repos/<owner>/<repo>/tags (If-None-Match) → the newest plain version tag, v1.2.3 or 1.2.3
+  newer than every release deployed before → deploy it; otherwise nothing
+  (a deployed release whose tag moved to another commit isn't redeployed; a warning is logged)
+
+project broken and it's the failing commit → not tried again (no error for the scan)
 record the check (time, count, and the error or none)
 ```
+
+**One deploy at a time, in order.** Checks, the CLI and the reconcile loop all wait for one turn: the next to go is the lowest tier (data, infra, apps), then whoever asked first. So when sparkdb has to deploy or come back, it goes before the next app; and while an infrastructure project deploys, nothing else does until it's verified healthy.
+
+**The reconcile loop.** Every minute (unless paused), each deployed project that isn't stopped on purpose is looked at in Docker. One that's **down**, with no containers at all or none running while a long-running service (one with a restart policy) is stopped, on **two passes in a row** (so one Docker is restarting isn't mistaken for one that's gone), is deployed again at its deployed commit, trigger `reconcile`. Data projects come back first, each waiting until it's healthy. Docker's restart policies still handle crashes and reboots; this covers what they can't, such as removed containers. Stopping one service (`stop <name>:<service>`) isn't the project being down.
 
 A scan that had failures logs one line naming the projects; `list` and `status` show each project's last error, `history <name>` every deploy, `report <name>` one deploy step by step.
 
@@ -211,8 +226,10 @@ A scan that had failures logs one line naming the projects; `list` and `status` 
 
 | Kind | What it means | Examples | What happens next |
 |---|---|---|---|
-| Transient | Something around the commit had a problem; trying again may work | GitHub, Cove or the network unreachable or erroring, Docker unreachable | Tried again at the next check; doesn't count |
+| Transient | Something around the commit had a problem; trying again may work | GitHub, Cove or the network unreachable or erroring, Docker unreachable, a backup that failed | Automatic deploys of that project **wait** 1 minute, then 2, 4, … up to 30 minutes between tries; doesn't count. A success, or `deploy`, ends the wait |
 | Permanent | The commit itself has a problem | The compose file is invalid, a secret is missing or forbidden, the build fails, a service doesn't come up | Counted per commit. After **3** in a row for the same commit the project is **broken**: that commit isn't tried again until a new commit arrives or `retry <name>` |
+
+The waits are kept in memory: a restart of Lighthouse starts them over.
 
 `deploy <name>` always deploys, broken or not. `retry <name>` clears the count and deploys. A success clears everything.
 
@@ -228,11 +245,12 @@ Deploys run one at a time; a second waits for the first. Each step has a deadlin
 | `test` (20 min) | For each Dockerfile with a stage named `test` (`FROM … AS test`): `docker build --target test`, with nothing from the compose file (no secrets, no build arguments). None: nothing runs | Serving | Permanent |
 | `secrets` | Every variable **without a default** is fetched from Cove in one batch; one with a default is a setting and isn't fetched (a warning says so) | Serving | Permanent for a missing, forbidden or invalid key; transient for Cove trouble |
 | `build` (20 min) | The running images are tagged `<image>:lh-<commit>` for rollback; `docker compose -p <project> build`; the new images get their `lh-<commit>` tag | Serving | Permanent |
+| `backup` | Fetches the previous version's secrets (for a rollback that doesn't need Cove). With `x-lighthouse` `backup: postgres`, dumps the running database to `BACKUP_PATH` ([§7.2](#72-lighthouse-settings-x-lighthouse)) | Serving | Transient |
 | `swap` (5 min) | `docker compose -p <project> up -d --no-build --remove-orphans`: Compose replaces the containers. **The only downtime** | Replaced | Permanent; rolls back |
 | `verify` (2 min) | Every service must be up: healthy if it has a healthcheck; else running, without restarting, for 10 s; a one-off service (no restart policy) may also have exited with 0. Unhealthy, crashed or restarting fails at once | New version | Permanent; rolls back |
 | `cleanup` | Keeps the new folder and the one it replaced; removes other deploy folders, rollback tags of other commits, images nothing uses, and (daily) build cache unused for a week. Never fails a deploy | New version | Only reported |
 
-**Rollback** (after a failed `swap` or `verify`): the previous images are put back under their usual names, the previous version's secrets are fetched, and `docker compose up` runs from the previous version's folder. The deployment is recorded as `rolled_back`. It isn't possible on a project's first deploy (nothing ran before), or when the previous version wasn't deployed by this Lighthouse (its folder isn't kept); then the deployment is `failed` and says so.
+**Rollback** (after a failed `swap` or `verify`): the previous images are put back under their usual names, the previous version's secrets (fetched before the swap) are given back, and `docker compose up` runs from the previous version's folder. The deployment is recorded as `rolled_back`. It isn't possible on a project's first deploy (nothing ran before), or when the previous version wasn't deployed by this Lighthouse (its folder isn't kept); then the deployment is `failed` and says so.
 
 From `swap` on, a deploy isn't cut off by Lighthouse stopping: a half-replaced project is worse than a late shutdown.
 
@@ -270,6 +288,7 @@ All settings are environment variables; Lighthouse's secrets (the GitHub token a
 | `COVE_TOKEN_PATH` | Yes | Where Lighthouse's Cove token is kept. Docker: `/app/vault/cove/token` |
 | `STAGING_PATH` | Yes | The deploy folders: `<compose project>/<commit>`, the running version and the one before it. Lighthouse owns everything in it, so it can't be `/`, `.` or a system folder. **In Docker it must be mounted at the same path on the host and in the container** (`/srv/server/staging`), so a relative bind mount in a project's compose file means the same files to Compose and to Docker |
 | `STORAGE_PATH` | No | The projects' data folders, default `/srv/server/storage`: a project may mount host paths from `<STORAGE_PATH>/<compose project>/` ([§7.1](#71-the-deploy-rules)). **In Docker, mount it read-only at the same path**, so the rules can follow a symlink a container left in its folder; without it, Lighthouse logs a warning at startup |
+| `BACKUP_PATH` | No | Database backups taken before a deploy (`x-lighthouse` `backup: postgres`), default `/srv/backups`: `<compose project>/<project>-<time>-<commit>.sql.gz`. **In Docker, mount it at the same path** (read-write) |
 | `APP_ENV` | No | `dev` or `prod`, shown in the shell's prompt (`lighthouse (prod)>`, prod in red) and by `status` |
 | `LIGHTHOUSE_VERSION` | No | The version `status` and `version` report. Set in the compose file at release; without it, `dev` (plus the commit for a local build) |
 | `LIGHTHOUSE_POLL_INTERVAL` | No | How often GitHub is checked, e.g. `30s`, `1m`. Default `10s`, minimum `5s` |
@@ -285,6 +304,7 @@ A malformed value stops startup with a message naming the setting.
 | `/srv/server/storage/lighthouse/cove/` | `/app/vault/cove/` | The Cove token file (`token`, mode 0600) |
 | `/srv/server/staging` | `/srv/server/staging` (the same path) | Deploy folders |
 | `/srv/server/storage` | `/srv/server/storage` (the same path, read-only) | The projects' data folders, read to check symlinks |
+| `/srv/backups` | `/srv/backups` (the same path) | Database backups (`BACKUP_PATH`); must exist before Lighthouse starts |
 | `/var/run/docker.sock` | `/var/run/docker.sock` | Full control of the host's Docker (effectively root) |
 
 No port is published and no terminal is attached. `stop_grace_period: 2m` gives a deploy in progress time to finish its check. Lighthouse joins the external `spark` network so it can reach `cove` and `sparkdb`.
@@ -304,7 +324,10 @@ Lighthouse's state is in `lighthouse_db` on sparkdb, schema `lighthouse`. Roles,
 | `repo_owner`, `repo_name` | `https://github.com/<owner>/<name>`; unique without regard to case |
 | `compose_project` | The compose project, as its compose file names it, learned at each deploy; unique, so two projects can't share one. Empty before the first deploy (the repository's name, lowercased, is used meanwhile) |
 | `created_at`, `updated_at` | When Lighthouse started watching it; when it was last renamed or pointed elsewhere |
-| `deployed_sha`, `deployed_at` | The last **successful** deploy |
+| `deployed_sha`, `deployed_version`, `deployed_at` | The last **successful** deploy, and the release it was (release mode) |
+| `highest_version` | The highest release ever deployed successfully: checks only deploy a newer one |
+| `deploy_mode`, `tier` | The `x-lighthouse` settings as last read: `branch`/`releases`, `data`/`infra`/`app` |
+| `stopped` | Stopped on purpose (`stop <name>`): not deployed or brought back until `start`, `restart` or `deploy` |
 | `last_checked_at`, `check_count` | The last check of GitHub |
 | `last_error`, `last_error_at` | The last problem (a check or a deploy), cleared by the next success. Cut at 2,000 characters |
 | `failure_count`, `failing_sha`, `broken` | Permanent failures in a row of one commit; at 3, `broken` |
@@ -314,8 +337,8 @@ Lighthouse's state is in `lighthouse_db` on sparkdb, schema `lighthouse`. Roles,
 | Column | Notes |
 |---|---|
 | `project_id` | Its project; the rows go when the project is removed |
-| `sha` | The commit deployed |
-| `trigger` | `check` (a new commit found by a check or `scan`) or `manual` (`deploy`, `retry`) |
+| `sha`, `version` | The commit deployed, and the release it is (release mode) |
+| `trigger` | `check` (something new found by a check or `scan`), `manual` (`deploy`, `retry`) or `reconcile` (brought back by the reconcile loop) |
 | `status` | `succeeded`, `failed` (nothing changed) or `rolled_back` (the previous version was put back) |
 | `failure_kind`, `failed_step` | For a failure: `transient`/`permanent`, and the step |
 | `started_at`, `finished_at`, `error` | |
@@ -324,7 +347,7 @@ Lighthouse's state is in `lighthouse_db` on sparkdb, schema `lighthouse`. Roles,
 
 **`goose_db_version`**: which migrations have run.
 
-**Who may do what** (migrations `00002`, `00003`): `lighthouse_app` reads and changes `projects`, but can only **add** to `deployments` and `deployment_steps`, never change or delete history, and only reads `goose_db_version`; it can't create anything. `lighthouse_reader` reads everything (pgAdmin). Everything is owned by `lighthouse_owner`.
+**Who may do what** (migrations `00002`–`00004`): `lighthouse_app` reads and changes `projects`, but can only **add** to `deployments` and `deployment_steps`, never change or delete history, and only reads `goose_db_version`; it can't create anything. `lighthouse_reader` reads everything (pgAdmin). Everything is owned by `lighthouse_owner`.
 
 **From the pre-1.0 Lighthouse:** `lighthouse import` reads its `repos.json` and adds each project with its state: when watching started, the deployed commit, checks, last error. It's safe to run twice, because existing projects are skipped. Steps in [§10](#10-deploying-lighthouse).
 
@@ -422,6 +445,36 @@ A port published on every interface (`"2400:2400"`) is only a warning: anything 
 ```
 
 A finding an exception allows is still shown, marked `allowed by policy.json: <reason>`. A malformed `policy.json` (an unknown field, an exception without a reason, `"*"`) fails Lighthouse's tests and its startup. `lh check <name>` runs a project's latest commit through the rules and its test stage without deploying it; `lh help rules` is the short version of this section.
+
+### 7.2 Lighthouse settings (`x-lighthouse`)
+
+A project's few Lighthouse settings live in its own compose file, in a top-level `x-lighthouse:` block that Compose ignores. Nothing is set on the server. Without the block, a project deploys every commit on its default branch, as an app.
+
+```yaml
+name: sparkdb
+x-lighthouse:
+  deploy: releases   # branch (default): every commit on the default branch
+                     # releases: only version tags, v1.2.3 or 1.2.3
+  tier: data         # app (default), infra or data
+  backup: postgres   # dump the database before every deploy
+services:
+  db:
+    image: postgres:16.4
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      retries: 12
+```
+
+| Setting | Values | What it does |
+|---|---|---|
+| `deploy` | `branch` (default), `releases` | `releases`: only tags that are plain versions deploy (pre-releases such as `v1.1.0-rc.1` and other tags don't); a newer one than **any release deployed before** deploys automatically, so going back by hand (`deploy <name> v1.0.0`) sticks until a newer release is tagged. Pushing to the branch does nothing. Your release flow (tag, then push `main`) deploys at the tag |
+| `tier` | `app` (default), `infra`, `data` | The order deploys and the reconcile loop go in: `data` (sparkdb) first, then `infra` (Cove, cloudflared), then apps. One deploy runs at a time, so an infrastructure deploy has the server to itself until it's healthy |
+| `backup` | `postgres` | Before the swap, `pg_dumpall` runs in the project's postgres service (the one whose image is `postgres…`) and is saved gzipped to `/srv/backups/<compose project>/` (mode 0600; the newest 5 are kept). If the backup fails, the deploy stops and nothing changes. On a first deploy, or when the database isn't running, there's nothing to back up |
+
+The settings are read from the default branch's compose file whenever the branch moves (to know whether to watch the branch or the tags), and from the deployed commit's compose config at each deploy (what the deploy does). A setting Lighthouse doesn't know is an error, at the check and at the deploy. The block is read with a small reader, not a full YAML parser: write it as indented `key: value` lines, or `{key: value, ...}` on one line.
+
+**Infrastructure deploys.** Everything a swap needs is fetched before it: the new version's secrets, and the previous version's (so a rollback doesn't need Cove, whose database may be what's being swapped). While sparkdb restarts, Lighthouse needs nothing from it; recording the deploy waits (up to 2 minutes) until the database is back. Rollback can't undo a data-format change: pin sparkdb's image to a version and plan a major Postgres upgrade by hand.
 
 ---
 
@@ -677,7 +730,7 @@ Delete `/srv/server/storage/lighthouse/cove/token`, `bootstrap open lighthouse` 
 
 ### After a server reboot
 
-Every container restarts by its own `restart:` policy. Lighthouse waits for Cove and for its database (`lh status` shows which), then starts checking. It doesn't start any project itself.
+Every container restarts by its own `restart:` policy. Lighthouse waits for Cove and for its database (`lh status` shows which), then starts checking. A project that's still down two minutes later (no container running where one should be) is brought back by the reconcile loop, data projects first ([§4.2](#42-the-check-loop)).
 
 ### Disk space
 
@@ -706,7 +759,9 @@ Each deploy cleans up after itself: deploy folders other than the running versio
 | `… needs confirmation, and there's no terminal to ask on` | Use `docker exec -it`, or add `--yes` |
 | `Lighthouse is still starting (…)` | Every command but `status` waits for startup; `status` and `docker logs lighthouse` say what it's waiting for |
 | A project's last check: `GitHub: 401` | The GitHub token is wrong or expired. Update `LIGHTHOUSE_GITHUB_TOKEN`, restart |
-| `GitHub: 403 (… rate limit …)` or `429` | Rate limit (5,000 requests an hour per token; each project uses 360 an hour at the default interval). Raise `LIGHTHOUSE_POLL_INTERVAL`. Transient: retried |
+| `GitHub: 403 (… rate limit …)` or `429` | Rate limit (5,000 requests an hour per token). Checks send the last ETag, and an unchanged answer doesn't count, so this takes many projects changing at once. Raise `LIGHTHOUSE_POLL_INTERVAL`. Transient: retried after a wait |
+| A project isn't deployed, and its last error is `x-lighthouse: …` | The compose file's `x-lighthouse` block has a setting Lighthouse doesn't know ([§7.2](#72-lighthouse-settings-x-lighthouse)) |
+| A deploy fails at `backup` | `pg_dumpall` failed (the message has its last lines), or `/srv/backups` isn't writable. Nothing changed; it's tried again after a wait |
 | `GitHub: 404` | Wrong URL, a renamed repo (`set-url`), or a private repo the token can't see. Other projects are still checked |
 | `fetch: … isn't a gzipped tarball` / `would be written outside` / `links outside the repository` | The archive is broken or holds a path that leaves its folder. Permanent; fix the repository |
 | `inspect: the compose file can't be read` | No compose file at the top, or it's invalid. `report <name>` shows Compose's message |
@@ -908,7 +963,7 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 
 #### B11. Lighthouse can't deploy itself, and Cove's deploy is fragile
 **Medium.** If `LightHouse` is ever added to its own watchlist, `Build` stops the `lighthouse` container, which kills the process doing the deploy. A stop through the API counts as a manual stop, so `unless-stopped` doesn't bring it back: Lighthouse stays down. Cove deploys only because its compose file has no placeholders ([§7](#7-connecting-a-project-the-contract)).
-**Status: partly fixed.** Cove's deploy is safe now (secrets are fetched before anything changes). Lighthouse deploying itself is F9.
+**Status: partly fixed.** Cove's and sparkdb's deploys are safe now: secrets (the previous version's too) are fetched before anything changes, infrastructure deploys run alone and in order, and sparkdb is backed up first ([§7.2](#72-lighthouse-settings-x-lighthouse)). Lighthouse deploying itself is F9.
 **Fix:** B1's fix handles Cove. Self-deploy is wanted for v1.0.0 and needs a helper container ([F9](#f9-self-update)).
 
 #### B12. "Start all" at startup does nothing; `Builder.WatchList` goes stale
@@ -916,6 +971,7 @@ Compose runs **inside** Lighthouse's container, so `./data` in a project's compo
 **Status: fixed** by removal: Lighthouse no longer tries to start projects or Cove at boot, and the builder's stale copy of the watchlist is gone (`start all` etc. read the live list).
 `StartAllContainers()` runs before the watchlist is loaded, so it loops over nothing, and its error is ignored. `Builder.WatchList` is a copy taken once at load: repos added later are missing from `start all`, `stop all` and `exit all`, and removed ones are still in it. `StartAllContainers`/`StopAllContainers` also stop at the first error. The "start `cove` if it isn't running" step runs after Cove was already needed.
 **Fix:** one source of truth for the project list; decide whether Lighthouse starts projects at all (restart policies already do; recommended: it doesn't).
+Since step 5, the reconcile loop brings back a project that stays down (no container running where one should be), data projects first ([§4.2](#42-the-check-loop)).
 
 #### B13. Names mean different things in different commands
 **Medium.** `models.WatchedRepo.ContainerName` is really the **GitHub repo name** from the URL.
@@ -1111,6 +1167,7 @@ Every successful build is tagged `lighthouse/<project>:<version>` (the tag in re
 A Discord webhook (`LIGHTHOUSE_DISCORD_WEBHOOK_URL` in Cove) on deploy succeeded, failed, broken, rolled back, waiting for approval; on Cove or GitHub unreachable or a token rejected; on a GitHub token expiring within 14 days; and on a container crash-looping (F16). Optionally a daily summary.
 
 #### F5. Efficient, reliable change detection
+**Mostly done in step 5:** ETags on the commit and tag checks (a `304` costs nothing), release mode, and growing waits after failures. Not done: the rate-limit headers and the token's expiry (with notifications, step 7).
 - Branch mode: `GET /repos/{o}/{r}/commits/{branch}` with `Accept: application/vnd.github.sha` (40 bytes, instead of about 30 full commits).
 - Release mode: the tags list ([16.4](#164-release-only-mode)).
 - `If-None-Match` with the last ETag: a `304` doesn't count against the rate limit (today each repo costs 360 of the 5,000 requests per hour).
@@ -1177,10 +1234,12 @@ From `todo.txt`: register infrastructure Lighthouse doesn't build (pihole, cloud
 - `CHANGELOG.md`, `.dockerignore`, examples renamed (`exmaple` typo), a LICENSE if the repo is public.
 
 #### F15. Release-only mode
-See [16.4](#164-release-only-mode).
+**Done in step 5**, set in the compose file ([§7.2](#72-lighthouse-settings-x-lighthouse)). See [16.4](#164-release-only-mode).
 
 #### F16. Reconcile loop
-Lighthouse subscribes to Docker's event stream (and checks every few minutes as a backstop). It compares each project's **desired state** (running a given version, or stopped on purpose) with the actual state, read through the `com.docker.compose.project` label: containers, health, image tag.
+**Done in step 5, smaller than planned** ([§4.2](#42-the-check-loop)): every minute, a project that's down on two passes in a row is deployed again at its deployed commit; one stopped on purpose is left alone. Not done: Docker's event stream, unhealthy and crash-loop detection, and spotting an image deployed by hand; they'd come with notifications.
+
+The original plan: Lighthouse subscribes to Docker's event stream (and checks every few minutes as a backstop). It compares each project's **desired state** (running a given version, or stopped on purpose) with the actual state, read through the `com.docker.compose.project` label: containers, health, image tag.
 
 | Drift | Action |
 |---|---|
@@ -1241,6 +1300,8 @@ After 3 counted failures for the same version, the project is **broken**: no mor
 
 ### 16.4 Release-only mode
 
+**Built in step 5, set in the compose file instead of with flags** (`x-lighthouse: {deploy: releases}`, [§7.2](#72-lighthouse-settings-x-lighthouse)); there's no `--prereleases` and no `--from`. Images keep their `lh-<commit>` rollback tags; `list`, `status` and `history` show the version next to the commit. Automatic deploys only go to a release newer than any deployed before. The plan as written:
+
 `add https://github.com/LSariol/plop --release-only`
 
 - **What counts as a release:** tags that are plain semantic versions, `v1.2.3` or `1.2.3`, compared as versions (so `v1.10.0` > `v1.9.0`). Pre-releases (`v1.1.0-rc.1`) are ignored unless the project has `--prereleases`. Anything else (`latest`, `deploy-test`) is ignored.
@@ -1252,6 +1313,8 @@ After 3 counted failures for the same version, the project is **broken**: no mor
 - **Your release flow** pushes the tag, then `main`. For a release-only project the tag deploys and `main` does nothing. That's the natural mode for **Lighthouse itself and the infrastructure tier**. Branch mode stays the default for everyday projects.
 
 ### 16.5 Infrastructure projects
+
+**Built in step 5, differently** ([§7.2](#72-lighthouse-settings-x-lighthouse)): the tier is set in the compose file (`tier: data` for sparkdb, `infra` for Cove and cloudflared), the backup is `backup: postgres`, and there's **no approval step**: with release mode, a deploy only happens when a tag is pushed, which is already deliberate. The rest stands. The plan as written:
 
 sparkdb, Cove and cloudflared are added with `--infra`. What happened before: deploying sparkdb stopped it first, and then Cove couldn't read the secrets from its database to finish the deploy (B1). The new pipeline fixes that order. On top of it:
 
@@ -1317,9 +1380,14 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
    - No migration was needed: the secret prefix is derived from the compose project, and exceptions aren't in the database.
    - Fixed along the way: B21, S1 (interim), S2 (layer 1).
    - Trivy and gitleaks were dropped ([16.10](#1610-decisions-2026-10-06)); so was the health URL setting.
-5. **Orchestrator:**
-   - Queue and worker, polling with ETags.
-   - Release-only mode, the infrastructure tier, the reconcile loop.
+5. **Orchestrator — done** (2026-10-06):
+   - ETag polling (commits and tags), the compose file's `x-lighthouse` settings read from the default branch ([§7.2](#72-lighthouse-settings-x-lighthouse)); packages `settings` and `release`.
+   - Release mode: newest plain version tag, only newer than any deployed before; `deploy <name> <version>`.
+   - Tiers (`data`, `infra`, `app`): one deploy at a time, lowest tier first, for checks, the CLI and the reconcile loop alike (a priority turn rather than a worker goroutine).
+   - The `backup` step (`pg_dumpall`, `BACKUP_PATH`) and the previous version's secrets fetched before the swap.
+   - Growing waits after passing failures (1 → 30 min); recording a deploy waits for the database to come back.
+   - The reconcile loop; `stop` keeps a project down on purpose.
+   - Migration `00004`. No approval step, no Docker event stream (16.5, F16).
 6. **CLI:** the full command set (F7).
 7. **Notifications and self-update:** F4, F9.
 8. **Release:**
@@ -1359,6 +1427,8 @@ A project's nickname, its repository, its compose project and its containers are
 - **Secret prefix = the compose project.** A project may read the Cove keys that start with its compose project's name in capitals (`-` becomes `_`; compose project `website` reads `WEBSITE_*`), plus `SHARED_*`. Nothing to set per project.
 - **Strict storage.** A project's host folders are only under `/srv/server/storage/<compose project>/`. Named volumes are fine. With sparkdb's data moved there, no current project needs an exception.
 - **Trivy and gitleaks are dropped.** Secrets come from Cove at deploy time, and image scanning is noise for a one-owner home server. A project that wants scanners runs them in its own Dockerfile `test` stage.
+- **Settings in the compose file** (decided for step 5): release mode and the tier are an `x-lighthouse` block in the project's compose file, not `add` flags ([§7.2](#72-lighthouse-settings-x-lighthouse)).
+- **Infrastructure deploys don't wait for approval:** sparkdb is backed up, then deploys go one at a time, data → infra → apps. sparkdb comes back under Lighthouse once v1.0.0 is deployed.
 - **Policy exceptions live in `policy.json`** in Lighthouse's own repository, built into the binary: reviewed in git, deployed like everything else ([§7.1](#71-the-deploy-rules)). Not in the database, and there's no CLI to change them.
 
 ---

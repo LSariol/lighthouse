@@ -163,15 +163,17 @@ func commandTable(embedded bool) []command {
 		{
 			names:    []string{"deploy", "rebuild"},
 			group:    groupDeploying,
-			synopsis: "<name|all>",
-			summary:  "Deploy the latest commit now",
+			synopsis: "<name|all> [version]",
+			summary:  "Deploy the latest commit or release now",
 			usages: []usage{
-				{"deploy <name>", "Build and start a project's latest commit now, even if it's already deployed or broken. The running version keeps serving until the new one is built; if the new one doesn't come up, the old one is put back. Waits until it's done."},
+				{"deploy <name>", "Build and start a project's latest commit (or, for a project that deploys releases, its newest release) now, even if it's already deployed or broken. The running version keeps serving until the new one is built; if the new one doesn't come up, the old one is put back. Waits until it's done. A stopped project is started again."},
+				{"deploy <name> <version>", "Deploy a tag, such as an older release to go back to. Automatic deploys never go back to an older release by themselves."},
 				{"deploy all", "Deploy every project, one after another. Asks first."},
 			},
 			flags: []flag{{"--yes, -y", "deploy all: don't ask for confirmation."}},
 			examples: []example{
 				{"deploy plop", "redeploy after changing one of its secrets"},
+				{"deploy cove v1.0.0", "go back to Cove v1.0.0"},
 				{"deploy all --yes", "everything, no question"},
 			},
 			run:      (*CLI).deploy,
@@ -280,7 +282,7 @@ func commandTable(embedded bool) []command {
 			synopsis: "<name[:service]|all>",
 			summary:  "Stop a project's containers",
 			usages: []usage{
-				{"stop <name>", "Stop every container of a project; it's offline until started or deployed again. Asks first."},
+				{"stop <name>", "Stop every container of a project. It stays down on purpose: new commits aren't deployed and Lighthouse doesn't bring it back, until it's started or deployed again. Asks first."},
 				{"stop <name>:<service>", "Stop one service's container. Asks first."},
 				{"stop all", "Stop every project's containers. Asks first."},
 			},
@@ -398,6 +400,11 @@ const setupGuide = `Getting a repository ready for Lighthouse (e.g. "plop")
 4. Optional: tests. A Dockerfile stage named test (FROM ... AS test) is
    built before every deploy, without secrets; if it fails, nothing is
    deployed.
+   Optional: settings, in the compose file:
+     x-lighthouse:
+       deploy: releases          only version tags (v1.2.3) deploy
+       tier: infra               data, infra or app: the order of deploys
+       backup: postgres          dump the database before each deploy
 
 5. Add it. It's named after the repository (lowercase):
      add https://github.com/LSariol/plop

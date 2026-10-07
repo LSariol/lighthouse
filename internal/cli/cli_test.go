@@ -92,7 +92,9 @@ func (f *fakeService) Rename(ctx context.Context, name, newName string) error {
 func (f *fakeService) SetURL(ctx context.Context, name, url string) error {
 	return f.act("set-url", name)
 }
-func (f *fakeService) Deploy(ctx context.Context, name string) error  { return f.act("deploy", name) }
+func (f *fakeService) Deploy(ctx context.Context, name string, version string) error {
+	return f.act(strings.TrimSpace("deploy "+version), name)
+}
 func (f *fakeService) Scan(ctx context.Context) error                 { return f.act("scan", "") }
 func (f *fakeService) Pause(ctx context.Context) error                { return f.act("pause", "") }
 func (f *fakeService) Resume(ctx context.Context) error               { return f.act("resume", "") }
@@ -195,6 +197,37 @@ func TestUnknownAndWrongUsage(t *testing.T) {
 	}
 	if _, _, err := run(t, newFake(), "logs plop many"); !errors.As(err, &usage) {
 		t.Errorf("logs with a bad count = %v, want a usage error", err)
+	}
+}
+
+func TestDeployVersion(t *testing.T) {
+	svc := newFake("cove")
+	if _, errOut, err := run(t, svc, "deploy cove v1.0.0"); err != nil || svc.calls[0] != "deploy v1.0.0 cove" || !strings.Contains(errOut, `"cove" at v1.0.0`) {
+		t.Errorf("deploy cove v1.0.0: %v, calls %v\n%s", err, svc.calls, errOut)
+	}
+	var usage usageError
+	if _, _, err := run(t, newFake("cove"), "deploy all v1.0.0 --yes"); !errors.As(err, &usage) {
+		t.Errorf("deploy all with a version = %v, want a usage error", err)
+	}
+}
+
+func TestListShowsReleasesAndStopped(t *testing.T) {
+	svc := newFake("cove", "plop")
+	svc.projects[0].Mode, svc.projects[0].Tier, svc.projects[0].Version, svc.projects[0].Commit = "releases", "infra", "v1.2.0", "abcdef123"
+	svc.projects[1].Stopped, svc.projects[1].Commit = true, "1234567aa"
+	out, _, err := run(t, svc, "list")
+	for _, want := range []string{"releases, infra", "v1.2.0 (abcdef1)", "commits", "1234567, stopped"} {
+		if err != nil || !strings.Contains(out, want) {
+			t.Errorf("list lacks %q:\n%s", want, out)
+		}
+	}
+
+	// A project stopped on purpose isn't a problem for status.
+	svc.status.Projects = svc.projects
+	svc.status.Projects[1].State = "stopped"
+	out, _, err = run(t, svc, "status")
+	if err != nil || !strings.Contains(out, "stopped on purpose") {
+		t.Errorf("status: %v\n%s", err, out)
 	}
 }
 

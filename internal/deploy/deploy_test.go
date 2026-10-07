@@ -95,7 +95,10 @@ type fakeCompose struct {
 	config   string
 	stageErr error
 
-	stages []string // Dockerfiles whose test stage was built
+	stages  []string // Dockerfiles whose test stage was built
+	execs   []string // containers commands ran in
+	dump    string   // what Exec writes (a database dump)
+	execErr error
 
 	mu     sync.Mutex
 	builds []string // dirs
@@ -123,6 +126,14 @@ func (f *fakeCompose) Inspect(ctx context.Context, dir string) (compose.Project,
 		config = `{"services": {"web": {"build": {"context": ` + string(context) + `}}}}`
 	}
 	return compose.Project{Name: name, Services: services, Config: []byte(config)}, nil
+}
+
+func (f *fakeCompose) Exec(ctx context.Context, container string, command []string, stdout io.Writer) error {
+	f.mu.Lock()
+	f.execs = append(f.execs, container+": "+strings.Join(command, " "))
+	f.mu.Unlock()
+	io.WriteString(stdout, f.dump)
+	return f.execErr
 }
 
 func (f *fakeCompose) BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error {
@@ -300,7 +311,7 @@ func TestFirstDeploy(t *testing.T) {
 	if res.ComposeProject != "website" || claimed != "website" {
 		t.Errorf("compose project %q, claimed %q", res.ComposeProject, claimed)
 	}
-	want := "fetch=succeeded inspect=succeeded check=succeeded test=succeeded secrets=succeeded build=succeeded swap=succeeded verify=succeeded cleanup=succeeded"
+	want := "fetch=succeeded inspect=succeeded check=succeeded test=succeeded secrets=succeeded build=succeeded backup=succeeded swap=succeeded verify=succeeded cleanup=succeeded"
 	if got := stepStatuses(res); got != want {
 		t.Errorf("steps: %s", got)
 	}

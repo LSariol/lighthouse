@@ -21,6 +21,9 @@ services:
       # The projects' data folders: a project may mount host paths from
       # its own folder here, <compose project>/, and nowhere else.
       - STORAGE_PATH=/srv/server/storage
+      # Database backups taken before deploying a project with
+      # x-lighthouse backup: postgres (sparkdb), <compose project>/...
+      - BACKUP_PATH=/srv/backups
     volumes:
       # Lighthouse's Cove token (written on first start by the bootstrap).
       - type: bind
@@ -36,6 +39,10 @@ services:
         source: /srv/server/storage
         target: /srv/server/storage
         read_only: true
+      # Database backups (see BACKUP_PATH), the same path on both sides.
+      - type: bind
+        source: /srv/backups
+        target: /srv/backups
       # Full control of the host's Docker: how Lighthouse deploys projects.
       - type: bind
         source: /var/run/docker.sock

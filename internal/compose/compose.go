@@ -208,6 +208,26 @@ func (r Runner) BuildStage(ctx context.Context, buildContext string, dockerfile 
 	return nil
 }
 
+// Exec runs a command in a running container, sending its standard output
+// to stdout (e.g. a database dump). Its errors end up in the error.
+func (r Runner) Exec(ctx context.Context, container string, command []string, stdout io.Writer) error {
+	bin := r.Docker
+	if bin == "" {
+		bin = "docker"
+	}
+	var stderr tailBuffer
+	cmd := exec.CommandContext(ctx, bin, append([]string{"exec", container}, command...)...)
+	cmd.Env = BaseEnv()
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("docker exec %s: %w", container, ctx.Err())
+		}
+		return fmt.Errorf("docker exec %s failed (%v): %s", container, err, stderr.lastLines(3))
+	}
+	return nil
+}
+
 // Up starts the project from images already built, replacing its running
 // containers, and removes containers of services it no longer has.
 func (r Runner) Up(ctx context.Context, dir string, project string, env []string, out io.Writer) error {

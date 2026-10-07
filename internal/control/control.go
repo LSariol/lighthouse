@@ -28,7 +28,9 @@ type Service interface {
 	Rename(ctx context.Context, name string, newName string) error
 	SetURL(ctx context.Context, name string, url string) error
 
-	Deploy(ctx context.Context, name string) error
+	// Deploy deploys a project now: the given version (a tag), or else its
+	// newest release (release mode) or its branch's newest commit.
+	Deploy(ctx context.Context, name string, version string) error
 	// Check runs the project's latest commit through the deploy's checks
 	// (the rules and the test stage) without deploying it. The result, with
 	// its steps, isn't recorded in the history.
@@ -76,6 +78,10 @@ type Project struct {
 	State         string          `json:"state,omitempty"`
 	Services      []ServiceStatus `json:"services,omitempty"` // in Status only
 	Commit        string          `json:"commit,omitempty"`
+	Version       string          `json:"version,omitempty"` // the release deployed, in release mode
+	Mode          string          `json:"mode,omitempty"`    // "branch" or "releases" (x-lighthouse deploy)
+	Tier          string          `json:"tier,omitempty"`    // "data", "infra" or "app" (x-lighthouse tier)
+	Stopped       bool            `json:"stopped,omitempty"` // stopped on purpose: not deployed or brought back until started
 	WatchingSince time.Time       `json:"watchingSince"`
 	LastDeployed  *time.Time      `json:"lastDeployed,omitempty"`
 	LastChecked   *time.Time      `json:"lastChecked,omitempty"`
@@ -97,7 +103,8 @@ type ServiceStatus struct {
 // Deployment is one deploy attempt, from the project's history.
 type Deployment struct {
 	Commit      string    `json:"commit,omitempty"`
-	Trigger     string    `json:"trigger"`               // "check" or "manual"
+	Version     string    `json:"version,omitempty"`     // the release deployed, if it was one
+	Trigger     string    `json:"trigger"`               // "check", "manual" or "reconcile"
 	Status      string    `json:"status"`                // "succeeded", "failed" or "rolled_back"
 	FailureKind string    `json:"failureKind,omitempty"` // "transient" or "permanent"
 	FailedStep  string    `json:"failedStep,omitempty"`

@@ -12,6 +12,7 @@ import (
 
 	"github.com/lsariol/lighthouse/internal/github"
 	"github.com/lsariol/lighthouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/release"
 )
 
 // Store is an in-memory projects.Store. The zero value is ready to use.
@@ -70,7 +71,7 @@ func (s *Store) Add(ctx context.Context, name string, repo github.Repo) (project
 	if s.repoIndex(repo) >= 0 {
 		return projects.Project{}, projects.ErrRepoWatched
 	}
-	p := projects.Project{Name: name, Repo: repo, CreatedAt: time.Now()}
+	p := projects.Project{Name: name, Repo: repo, CreatedAt: time.Now(), Mode: "branch", Tier: "app"}
 	s.projects = append(s.projects, p)
 	return p, nil
 }
@@ -149,6 +150,28 @@ func (s *Store) SetComposeProject(ctx context.Context, name string, composeProje
 	return nil
 }
 
+func (s *Store) SetSettings(ctx context.Context, name string, mode string, tier string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.index(name)
+	if i < 0 {
+		return projects.ErrNotFound
+	}
+	s.projects[i].Mode, s.projects[i].Tier = mode, tier
+	return nil
+}
+
+func (s *Store) SetStopped(ctx context.Context, name string, stopped bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.index(name)
+	if i < 0 {
+		return projects.ErrNotFound
+	}
+	s.projects[i].Stopped = stopped
+	return nil
+}
+
 func (s *Store) RecordCheck(ctx context.Context, name string, checkErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -188,7 +211,8 @@ func (s *Store) RecordDeployment(ctx context.Context, d projects.Deployment) err
 
 	finished := d.FinishedAt
 	if d.Status == projects.StatusSucceeded {
-		p.DeployedSHA, p.DeployedAt = d.SHA, &finished
+		p.DeployedSHA, p.DeployedVersion, p.DeployedAt = d.SHA, d.Version, &finished
+		p.HighestVersion = release.Higher(p.HighestVersion, d.Version)
 		p.LastError, p.LastErrorAt = "", nil
 		p.FailureCount, p.FailingSHA, p.Broken = 0, "", false
 		return nil

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lsariol/lighthouse/internal/github"
 	"github.com/lsariol/lighthouse/internal/projects"
+	"github.com/lsariol/lighthouse/internal/release"
 )
 
 // The Database is the projects.Store.
@@ -46,14 +47,14 @@ func constraintError(err error) error {
 }
 
 const projectColumns = `name, repo_owner, repo_name, created_at, coalesce(compose_project, ''),
-	coalesce(deployed_sha, ''), deployed_at, last_checked_at, check_count, coalesce(last_error, ''), last_error_at,
-	failure_count, coalesce(failing_sha, ''), broken`
+	coalesce(deployed_sha, ''), coalesce(deployed_version, ''), coalesce(highest_version, ''), deployed_at, last_checked_at, check_count, coalesce(last_error, ''), last_error_at,
+	failure_count, coalesce(failing_sha, ''), broken, deploy_mode, tier, stopped`
 
 func scanProject(row pgx.Row) (projects.Project, error) {
 	var p projects.Project
 	err := row.Scan(&p.Name, &p.Repo.Owner, &p.Repo.Name, &p.CreatedAt, &p.ComposeProject,
-		&p.DeployedSHA, &p.DeployedAt, &p.LastCheckedAt, &p.Checks, &p.LastError, &p.LastErrorAt,
-		&p.FailureCount, &p.FailingSHA, &p.Broken)
+		&p.DeployedSHA, &p.DeployedVersion, &p.HighestVersion, &p.DeployedAt, &p.LastCheckedAt, &p.Checks, &p.LastError, &p.LastErrorAt,
+		&p.FailureCount, &p.FailingSHA, &p.Broken, &p.Mode, &p.Tier, &p.Stopped)
 	return p, err
 }
 
@@ -133,6 +134,14 @@ func (d *Database) SetComposeProject(ctx context.Context, name string, composePr
 	return d.exec(ctx, `UPDATE lighthouse.projects SET compose_project = $2 WHERE lower(name) = lower($1)`, name, composeProject)
 }
 
+func (d *Database) SetSettings(ctx context.Context, name string, mode string, tier string) error {
+	return d.exec(ctx, `UPDATE lighthouse.projects SET deploy_mode = $2, tier = $3 WHERE lower(name) = lower($1)`, name, mode, tier)
+}
+
+func (d *Database) SetStopped(ctx context.Context, name string, stopped bool) error {
+	return d.exec(ctx, `UPDATE lighthouse.projects SET stopped = $2, updated_at = now() WHERE lower(name) = lower($1)`, name, stopped)
+}
+
 func (d *Database) RecordCheck(ctx context.Context, name string, checkErr error) error {
 	return d.exec(ctx, `UPDATE lighthouse.projects
 		SET last_checked_at = now(),
@@ -147,7 +156,9 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
 		var id int64
-		err := tx.QueryRow(ctx, `SELECT id FROM lighthouse.projects WHERE lower(name) = lower($1) FOR UPDATE`, dep.Project).Scan(&id)
+		var highest string
+		err := tx.QueryRow(ctx, `SELECT id, coalesce(highest_version, '') FROM lighthouse.projects WHERE lower(name) = lower($1) FOR UPDATE`,
+			dep.Project).Scan(&id, &highest)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return projects.ErrNotFound
 		}
@@ -157,10 +168,10 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 
 		var depID int64
 		err = tx.QueryRow(ctx, `INSERT INTO lighthouse.deployments
-			(project_id, sha, trigger, status, failure_kind, failed_step, started_at, finished_at, error)
-			VALUES ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), $7, $8, nullif($9, ''))
+			(project_id, sha, version, trigger, status, failure_kind, failed_step, started_at, finished_at, error)
+			VALUES ($1, nullif($2, ''), nullif($3, ''), $4, $5, nullif($6, ''), nullif($7, ''), $8, $9, nullif($10, ''))
 			RETURNING id`,
-			id, dep.SHA, dep.Trigger, dep.Status, dep.FailureKind, dep.FailedStep, dep.StartedAt, dep.FinishedAt, errText).Scan(&depID)
+			id, dep.SHA, dep.Version, dep.Trigger, dep.Status, dep.FailureKind, dep.FailedStep, dep.StartedAt, dep.FinishedAt, errText).Scan(&depID)
 		if err != nil {
 			return fmt.Errorf("record deployment: %w", err)
 		}
@@ -177,9 +188,9 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 		switch {
 		case dep.Status == projects.StatusSucceeded:
 			_, err = tx.Exec(ctx, `UPDATE lighthouse.projects
-				SET deployed_sha = $2, deployed_at = $3, last_error = NULL, last_error_at = NULL,
-				    failure_count = 0, failing_sha = NULL, broken = false
-				WHERE id = $1`, id, dep.SHA, dep.FinishedAt)
+				SET deployed_sha = $2, deployed_version = nullif($4, ''), highest_version = nullif($5, ''), deployed_at = $3,
+				    last_error = NULL, last_error_at = NULL, failure_count = 0, failing_sha = NULL, broken = false
+				WHERE id = $1`, id, dep.SHA, dep.FinishedAt, dep.Version, release.Higher(highest, dep.Version))
 		case dep.FailureKind == projects.FailurePermanent:
 			// The count restarts with a new commit; at BrokenAfter the
 			// project is broken.
@@ -205,7 +216,7 @@ func (d *Database) ClearFailures(ctx context.Context, name string) error {
 		WHERE lower(name) = lower($1)`, name)
 }
 
-const deploymentColumns = `d.id, coalesce(d.sha, ''), d.trigger, d.status, coalesce(d.failure_kind, ''), coalesce(d.failed_step, ''),
+const deploymentColumns = `d.id, coalesce(d.sha, ''), coalesce(d.version, ''), d.trigger, d.status, coalesce(d.failure_kind, ''), coalesce(d.failed_step, ''),
 	d.started_at, d.finished_at, coalesce(d.error, '')`
 
 // deployments returns the project's deployments, newest first, with their
@@ -226,7 +237,7 @@ func (d *Database) deployments(ctx context.Context, p projects.Project, limit in
 	for rows.Next() {
 		dep := projects.Deployment{Project: p.Name}
 		var id int64
-		if err := rows.Scan(&id, &dep.SHA, &dep.Trigger, &dep.Status, &dep.FailureKind, &dep.FailedStep,
+		if err := rows.Scan(&id, &dep.SHA, &dep.Version, &dep.Trigger, &dep.Status, &dep.FailureKind, &dep.FailedStep,
 			&dep.StartedAt, &dep.FinishedAt, &dep.Error); err != nil {
 			return nil, nil, fmt.Errorf("history of %q: %w", p.Name, err)
 		}

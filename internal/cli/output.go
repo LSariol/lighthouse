@@ -129,6 +129,28 @@ func shortSHA(sha string) string {
 	}
 }
 
+// deployed is what's deployed, for a table: "v1.2.0 (abc1234)" for a
+// release, "abc1234" for a commit, or "-".
+func deployed(version string, sha string) string {
+	if version != "" {
+		return version + " (" + shortSHA(sha) + ")"
+	}
+	return shortSHA(sha)
+}
+
+// follows says what a project deploys, and its tier if it isn't an app:
+// "commits", "releases, infra".
+func follows(mode string, tier string) string {
+	s := "commits"
+	if mode == "releases" {
+		s = "releases"
+	}
+	if tier != "" && tier != "app" {
+		s += ", " + tier
+	}
+	return s
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "-"

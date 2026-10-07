@@ -67,6 +67,16 @@ func (fakeDeployer) Check(ctx context.Context, req deploy.Request) deploy.Result
 
 type fakeCommits struct{}
 
+func (fakeCommits) CheckCommit(ctx context.Context, repo github.Repo, token string, etag string) (string, string, error) {
+	return "abc", "", nil
+}
+func (fakeCommits) Tags(ctx context.Context, repo github.Repo, token string, etag string) ([]github.Tag, string, error) {
+	return nil, "", nil
+}
+func (fakeCommits) ComposeFile(ctx context.Context, repo github.Repo, sha string, token string) (string, []byte, error) {
+	return "compose.yaml", []byte("services: {}\n"), nil
+}
+
 func (fakeCommits) LatestCommit(ctx context.Context, repo github.Repo, token string) (string, error) {
 	return "abc", nil
 }
@@ -85,7 +95,7 @@ func newDaemon(t *testing.T) (*Daemon, *fakeContainers, *fakeCompose, *projectst
 	}}
 	cmp := &fakeCompose{}
 	d := New(config.Config{Env: "dev", StagingPath: t.TempDir()}, "test", c, cmp)
-	d.Ready(store, orchestrator.New(store, fakeCommits{}, fakeDeployer{}, "t"), fakeHealth{3, 3})
+	d.Ready(store, orchestrator.New(store, fakeCommits{}, fakeDeployer{}, nil, "t"), fakeHealth{3, 3})
 
 	ctx := context.Background()
 	if _, err := d.Add(ctx, "personalWebsite", "https://github.com/lsariol/landing"); err != nil {
@@ -130,6 +140,20 @@ func TestTargets(t *testing.T) {
 	}
 	if err := d.Stop(ctx, "sparkdb"); kind(err) != control.KindNotFound {
 		t.Errorf("an unwatched name = %v", err)
+	}
+
+	// Stopping one service isn't stopping the project; stopping the whole
+	// project is, until it's started (or restarted) again.
+	if p, _ := d.Projects(ctx); p[0].Stopped {
+		t.Error("stopping one service marked the project stopped")
+	}
+	d.Stop(ctx, "personalWebsite")
+	if p, _ := d.Projects(ctx); !p[0].Stopped {
+		t.Error("stop didn't mark the project stopped")
+	}
+	d.Start(ctx, "personalwebsite")
+	if p, _ := d.Projects(ctx); p[0].Stopped {
+		t.Error("start didn't clear stopped")
 	}
 
 	// Logs of several services come with headers; of one, without.
@@ -246,7 +270,7 @@ func TestBeforeReady(t *testing.T) {
 		t.Errorf("Status = %+v, %v", status, err)
 	}
 	for name, err := range map[string]error{
-		"deploy": d.Deploy(ctx, "plop"),
+		"deploy": d.Deploy(ctx, "plop", ""),
 		"retry":  d.Retry(ctx, "plop"),
 		"scan":   d.Scan(ctx),
 		"pause":  d.Pause(ctx),

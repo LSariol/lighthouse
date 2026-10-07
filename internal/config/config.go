@@ -21,6 +21,7 @@ type Config struct {
 	CoveTokenPath string        // COVE_TOKEN_PATH: where Lighthouse's Cove token is kept
 	StagingPath   string        // STAGING_PATH: the deploy folders, <project>/<commit>; Lighthouse owns everything in it
 	StoragePath   string        // STORAGE_PATH: the projects' data folders, <compose project>/...; read only
+	BackupPath    string        // BACKUP_PATH: database backups taken before a deploy, <compose project>/...
 	Env           string        // APP_ENV: "dev" or "prod", shown in the shell's prompt
 	Version       string        // LIGHTHOUSE_VERSION: reported by status and version
 	ControlSocket string        // LIGHTHOUSE_CONTROL_SOCKET: where serve listens for the CLI
@@ -30,6 +31,7 @@ type Config struct {
 const (
 	defaultControlSocket = "/run/lighthouse/control.sock"
 	defaultStoragePath   = "/srv/server/storage"
+	defaultBackupPath    = "/srv/backups"
 	defaultPollInterval  = 10 * time.Second
 	minPollInterval      = 5 * time.Second
 )
@@ -51,6 +53,7 @@ func Load() (Config, error) {
 		CoveTokenPath: env("COVE_TOKEN_PATH"),
 		StagingPath:   env("STAGING_PATH"),
 		StoragePath:   env("STORAGE_PATH"),
+		BackupPath:    env("BACKUP_PATH"),
 		Env:           strings.ToLower(env("APP_ENV")),
 		Version:       env("LIGHTHOUSE_VERSION"),
 		ControlSocket: env("LIGHTHOUSE_CONTROL_SOCKET"),
@@ -61,6 +64,9 @@ func Load() (Config, error) {
 	}
 	if cfg.StoragePath == "" {
 		cfg.StoragePath = defaultStoragePath
+	}
+	if cfg.BackupPath == "" {
+		cfg.BackupPath = defaultBackupPath
 	}
 
 	if raw := env("LIGHTHOUSE_POLL_INTERVAL"); raw != "" {

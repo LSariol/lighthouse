@@ -154,8 +154,8 @@ func (c *Client) SetURL(ctx context.Context, name string, repoURL string) error 
 	return c.call(ctx, http.MethodPost, project(name)+"/url", map[string]string{"url": repoURL}, nil)
 }
 
-func (c *Client) Deploy(ctx context.Context, name string) error {
-	return c.call(ctx, http.MethodPost, project(name)+"/deploy", nil, nil)
+func (c *Client) Deploy(ctx context.Context, name string, version string) error {
+	return c.call(ctx, http.MethodPost, project(name)+"/deploy", map[string]string{"version": version}, nil)
 }
 
 func (c *Client) Start(ctx context.Context, name string) error {

@@ -11,9 +11,10 @@ import (
 )
 
 func (c *CLI) deploy(ctx context.Context, args []string) error {
+	const form = "deploy <name> [version] | deploy all [--yes]"
 	skip, rest := takeYesFlag(args[1:])
-	if len(rest) != 1 {
-		return usageError{form: "deploy <name|all> [--yes]"}
+	if len(rest) < 1 || len(rest) > 2 || len(rest) == 2 && strings.EqualFold(rest[0], "all") {
+		return usageError{form: form}
 	}
 
 	if strings.EqualFold(rest[0], "all") {
@@ -24,7 +25,11 @@ func (c *CLI) deploy(ctx context.Context, args []string) error {
 		return c.eachProject(ctx, "deploy", "Deployed", c.deployOne)
 	}
 
-	if err := c.deployOne(ctx, rest[0]); err != nil {
+	version := ""
+	if len(rest) == 2 {
+		version = rest[1]
+	}
+	if err := c.deployVersion(ctx, rest[0], version); err != nil {
 		return err
 	}
 	success(fmt.Sprintf("Deployed %q.", rest[0]))
@@ -32,8 +37,16 @@ func (c *CLI) deploy(ctx context.Context, args []string) error {
 }
 
 func (c *CLI) deployOne(ctx context.Context, name string) error {
-	info(fmt.Sprintf("Deploying %q. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", name))
-	return c.svc.Deploy(ctx, name)
+	return c.deployVersion(ctx, name, "")
+}
+
+func (c *CLI) deployVersion(ctx context.Context, name string, version string) error {
+	what := fmt.Sprintf("%q", name)
+	if version != "" {
+		what += " at " + version
+	}
+	info(fmt.Sprintf("Deploying %s. This can take a few minutes; \"docker logs -f lighthouse\" shows progress.", what))
+	return c.svc.Deploy(ctx, name, version)
 }
 
 func (c *CLI) retry(ctx context.Context, args []string) error {
@@ -140,7 +153,7 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 	for i, d := range deploys {
 		started := d.StartedAt
 		rows = append(rows, []string{
-			strconv.Itoa(i + 1), formatTime(&started), d.Trigger, result(d), shortSHA(d.Commit),
+			strconv.Itoa(i + 1), formatTime(&started), d.Trigger, result(d), deployed(d.Version, d.Commit),
 			took(d.StartedAt, d.FinishedAt), firstLine(d.Error, 50),
 		})
 	}
@@ -193,7 +206,7 @@ func (c *CLI) check(ctx context.Context, args []string) error {
 func printDeployment(d control.Deployment) {
 	started := d.StartedAt
 	fields([][2]string{
-		{"Commit", orDash(d.Commit)},
+		{"Commit", orDash(strings.TrimSpace(d.Version + " " + d.Commit))},
 		{"Started", formatTime(&started) + " (" + d.Trigger + ")"},
 		{"Took", took(d.StartedAt, d.FinishedAt)},
 		{"Result", result(d) + kindNote(d.FailureKind)},

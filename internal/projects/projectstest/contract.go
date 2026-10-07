@@ -191,6 +191,67 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 		}
 	})
 
+	t.Run("ReleasesSettingsStopped", func(t *testing.T) {
+		s := open(t)
+		s.Add(ctx, "cove", plop)
+		p, _ := s.Get(ctx, "cove")
+		if p.Mode != "branch" || p.Tier != "app" || p.Stopped || p.DeployedVersion != "" {
+			t.Errorf("a new project: mode %q, tier %q, stopped %v, version %q", p.Mode, p.Tier, p.Stopped, p.DeployedVersion)
+		}
+
+		if err := s.SetSettings(ctx, "COVE", "releases", "infra"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetStopped(ctx, "cove", true); err != nil {
+			t.Fatal(err)
+		}
+		p, _ = s.Get(ctx, "cove")
+		if p.Mode != "releases" || p.Tier != "infra" || !p.Stopped {
+			t.Errorf("after SetSettings and SetStopped: %+v", p)
+		}
+		if err := s.SetStopped(ctx, "gone", true); !errors.Is(err, projects.ErrNotFound) {
+			t.Errorf("SetStopped of a missing project = %v", err)
+		}
+		if err := s.SetSettings(ctx, "gone", "branch", "app"); !errors.Is(err, projects.ErrNotFound) {
+			t.Errorf("SetSettings of a missing project = %v", err)
+		}
+
+		now := time.Now().Truncate(time.Millisecond)
+		dep := projects.Deployment{Project: "cove", SHA: "ccc", Version: "v1.2.0", Trigger: projects.TriggerReconcile,
+			Status: projects.StatusSucceeded, StartedAt: now, FinishedAt: now}
+		if err := s.RecordDeployment(ctx, dep); err != nil {
+			t.Fatal(err)
+		}
+		p, _ = s.Get(ctx, "cove")
+		if p.DeployedVersion != "v1.2.0" || p.DeployedSHA != "ccc" {
+			t.Errorf("deployed %q at %q", p.DeployedVersion, p.DeployedSHA)
+		}
+		if h, _ := s.History(ctx, "cove", 1); len(h) != 1 || h[0].Version != "v1.2.0" || h[0].Trigger != projects.TriggerReconcile {
+			t.Errorf("History = %+v", h)
+		}
+
+		// Going back to an older release keeps the highest.
+		dep.SHA, dep.Version = "bbb", "v1.0.0"
+		s.RecordDeployment(ctx, dep)
+		if p, _ = s.Get(ctx, "cove"); p.DeployedVersion != "v1.0.0" || p.HighestVersion != "v1.2.0" {
+			t.Errorf("after going back: deployed %q, highest %q", p.DeployedVersion, p.HighestVersion)
+		}
+		// A failed newer one doesn't raise it.
+		failed := dep
+		failed.SHA, failed.Version, failed.Status, failed.FailureKind = "eee", "v1.3.0", projects.StatusFailed, projects.FailureTransient
+		s.RecordDeployment(ctx, failed)
+		if p, _ = s.Get(ctx, "cove"); p.HighestVersion != "v1.2.0" {
+			t.Errorf("a failed deploy raised the highest to %q", p.HighestVersion)
+		}
+
+		// A commit on the branch afterwards: no version.
+		dep.SHA, dep.Version = "ddd", ""
+		s.RecordDeployment(ctx, dep)
+		if p, _ = s.Get(ctx, "cove"); p.DeployedVersion != "" || p.HighestVersion != "v1.2.0" {
+			t.Errorf("a branch deploy: version %q, highest %q", p.DeployedVersion, p.HighestVersion)
+		}
+	})
+
 	t.Run("ComposeProject", func(t *testing.T) {
 		s := open(t)
 		s.Add(ctx, "personalWebsite", github.Repo{Owner: "lsariol", Name: "Landing"})

@@ -53,7 +53,6 @@ func Handler(svc Service) http.Handler {
 	})
 
 	actions := map[string]func(context.Context, string) error{
-		"deploy":  svc.Deploy,
 		"retry":   svc.Retry,
 		"start":   svc.Start,
 		"stop":    svc.Stop,
@@ -75,6 +74,15 @@ func Handler(svc Service) http.Handler {
 		respond(w, logs, err)
 	})
 
+	mux.HandleFunc("POST /v1/projects/{name}/deploy", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Version string `json:"version"`
+		}
+		if !decode(w, r, &body) {
+			return
+		}
+		respond(w, nil, svc.Deploy(r.Context(), r.PathValue("name"), body.Version))
+	})
 	mux.HandleFunc("POST /v1/projects/{name}/check", func(w http.ResponseWriter, r *http.Request) {
 		result, err := svc.Check(r.Context(), r.PathValue("name"))
 		respond(w, result, err)

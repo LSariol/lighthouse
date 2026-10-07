@@ -137,3 +137,67 @@ func TestArchive(t *testing.T) {
 		t.Errorf("a missing commit = %v, want a permanent error", err)
 	}
 }
+
+func TestPolling(t *testing.T) {
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/o/r/commits":
+			w.Header().Set("ETag", `"c1"`)
+			if r.Header.Get("If-None-Match") == `"c1"` {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Write([]byte(`[{"sha":"abc"}]`))
+		case r.URL.Path == "/repos/o/r/tags" && r.URL.Query().Get("page") == "":
+			w.Header().Set("ETag", `"t1"`)
+			if r.Header.Get("If-None-Match") == `"t1"` {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("Link", `<`+srvURL+`/repos/o/r/tags?per_page=100&page=2>; rel="next", <x>; rel="last"`)
+			w.Write([]byte(`[{"name":"v1.2.0","commit":{"sha":"s120"}}]`))
+		case r.URL.Path == "/repos/o/r/tags":
+			w.Write([]byte(`[{"name":"v1.0.0","commit":{"sha":"s100"}}]`))
+		case r.URL.Path == "/repos/o/r/contents/compose.yaml":
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/repos/o/r/contents/compose.yml" && r.URL.Query().Get("ref") == "abc":
+			if r.Header.Get("Accept") != "application/vnd.github.raw+json" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Write([]byte("name: r\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+	c := Client{HTTP: srv.Client(), API: srv.URL}
+	ctx := context.Background()
+	repo := Repo{"o", "r"}
+
+	sha, etag, err := c.CheckCommit(ctx, repo, "t", "")
+	if err != nil || sha != "abc" || etag != `"c1"` {
+		t.Errorf("CheckCommit = %q, %q, %v", sha, etag, err)
+	}
+	if _, _, err := c.CheckCommit(ctx, repo, "t", etag); !errors.Is(err, ErrNotModified) {
+		t.Errorf("CheckCommit with the ETag = %v, want ErrNotModified", err)
+	}
+
+	tags, etag, err := c.Tags(ctx, repo, "t", "")
+	if err != nil || len(tags) != 2 || tags[0] != (Tag{"v1.2.0", "s120"}) || tags[1] != (Tag{"v1.0.0", "s100"}) || etag != `"t1"` {
+		t.Errorf("Tags = %+v, %q, %v (want both pages)", tags, etag, err)
+	}
+	if _, _, err := c.Tags(ctx, repo, "t", etag); !errors.Is(err, ErrNotModified) {
+		t.Errorf("Tags with the ETag = %v, want ErrNotModified", err)
+	}
+
+	name, text, err := c.ComposeFile(ctx, repo, "abc", "t")
+	if err != nil || name != "compose.yml" || string(text) != "name: r\n" {
+		t.Errorf("ComposeFile = %q, %q, %v", name, text, err)
+	}
+	if _, _, err := c.ComposeFile(ctx, Repo{"o", "none"}, "abc", "t"); err == nil || !strings.Contains(err.Error(), "no compose file") || temporary(err) {
+		t.Errorf("no compose file: %v", err)
+	}
+}

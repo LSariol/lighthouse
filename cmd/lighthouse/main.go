@@ -198,11 +198,12 @@ func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClien
 	deployer := deploy.New(compose.Runner{}, dockerClient, github.Client{}, coveClient, deploy.Options{
 		Root:    cfg.StagingPath,
 		Storage: cfg.StoragePath,
+		Backups: cfg.BackupPath,
 		Policy:  rules,
 		Log:     os.Stderr,
 	})
 	commits := github.Client{HTTP: &http.Client{Timeout: 30 * time.Second}}
-	orch := orchestrator.New(db, commits, deployer, secrets.GitHubToken)
+	orch := orchestrator.New(db, commits, deployer, dockerClient, secrets.GitHubToken)
 	d.Ready(db, orch, db)
 
 	list, _ := db.List(ctx)

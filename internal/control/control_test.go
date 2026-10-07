@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,8 +44,8 @@ func (f *fakeService) SetURL(ctx context.Context, name, url string) error {
 	f.record("set-url " + name + " " + url)
 	return nil
 }
-func (f *fakeService) Deploy(ctx context.Context, name string) error {
-	f.record("deploy " + name)
+func (f *fakeService) Deploy(ctx context.Context, name string, version string) error {
+	f.record(strings.TrimSpace("deploy " + name + " " + version))
 	return errors.New("something internal broke")
 }
 func (f *fakeService) Retry(ctx context.Context, name string) error {
@@ -193,7 +194,7 @@ func TestErrorsKeepTheirKind(t *testing.T) {
 	}
 
 	// A plain error becomes an internal one, with its message.
-	if err := c.Deploy(ctx, "plop"); !errors.As(err, &e) || e.Kind != KindInternal || e.Message != "something internal broke" {
+	if err := c.Deploy(ctx, "plop", "v1.0.0"); !errors.As(err, &e) || e.Kind != KindInternal || e.Message != "something internal broke" {
 		t.Errorf("Deploy error = %#v", err)
 	}
 }

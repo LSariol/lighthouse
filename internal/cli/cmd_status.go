@@ -71,7 +71,7 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 		info("No projects are watched yet. Add one with \"add <url>\".")
 	default:
 		out("")
-		rows := [][]string{{"PROJECT", "SERVICE", "STATE", "COMMIT", "DEPLOYED", "LAST CHECK"}}
+		rows := [][]string{{"PROJECT", "SERVICE", "STATE", "RUNNING", "DEPLOYED", "LAST CHECK"}}
 		for _, p := range s.Projects {
 			check := "ok"
 			switch {
@@ -84,10 +84,14 @@ func (c *CLI) status(ctx context.Context, args []string) error {
 			case p.LastChecked == nil:
 				check = "-"
 			}
-			if p.State != "running" {
+			state := p.State
+			switch {
+			case p.Stopped:
+				state = "stopped on purpose"
+			case p.State != "running":
 				problems = append(problems, fmt.Sprintf("%q is %s", p.Name, p.State))
 			}
-			rows = append(rows, []string{p.Name, "", p.State, shortSHA(p.Commit), formatTime(p.LastDeployed), check})
+			rows = append(rows, []string{p.Name, "", state, deployed(p.Version, p.Commit), formatTime(p.LastDeployed), check})
 			for _, svc := range p.Services {
 				state := svc.State
 				if svc.Health != "" {

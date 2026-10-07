@@ -32,6 +32,12 @@ All notable changes to Lighthouse. Versions follow [semantic versioning](https:/
 - `govulncheck` is clean (the old `docker/docker` and OpenTelemetry advisories are gone).
 
 ### Added
+- **Release mode and tiers, set in the compose file.** An `x-lighthouse` block (`deploy: releases`, `tier: data|infra|app`, `backup: postgres`) is read from the default branch. A release-mode project deploys its newest version tag, and only one newer than any deployed before, so going back by hand sticks. `deploy <name> <version>` deploys a tag.
+- **One deploy at a time, in order:** data, then infra, then apps, for checks, the CLI and the reconcile loop alike.
+- **Backups before deploying a database** (`backup: postgres`): `pg_dumpall` to `BACKUP_PATH` (`/srv/backups`, mounted), the newest 5 kept; a failed backup stops the deploy. The previous version's secrets are fetched before every swap, so a rollback doesn't need Cove.
+- **The reconcile loop:** a deployed project that's down on two passes a minute apart is deployed again; `stop` keeps a project down on purpose (until `start`, `restart` or `deploy`).
+- **ETags** on GitHub checks (unchanged answers don't count against the rate limit), and growing waits (1 to 30 minutes) after passing failures.
+- `list` shows what each project deploys (commits or releases, and its tier) and what's running; migration `00004`.
 - **Deploy rules.** Before anything is built, a deploy checks its compose file: no privileged containers, host namespaces, added capabilities or devices; no host paths outside the repository and `/srv/server/storage/<compose project>/` (the Docker socket included; symlinks are followed); no other project's volumes or networks; only its own Cove keys (`<COMPOSE PROJECT>_*`) and `SHARED_*`; no name another project has on `spark`. Exceptions are in `policy.json`, built into the binary. `help rules` lists them.
 - **Test stages.** A Dockerfile stage named `test` is built before every deploy, without secrets; failing tests stop the deploy.
 - `check <name>`: runs a project's latest commit through the checks and its test stage without deploying it.

@@ -204,6 +204,10 @@ func toProject(p projects.Project) control.Project {
 		URL:            p.Repo.URL(),
 		ComposeProject: p.ComposeName(),
 		Commit:         p.DeployedSHA,
+		Version:        p.DeployedVersion,
+		Mode:           p.Mode,
+		Tier:           p.Tier,
+		Stopped:        p.Stopped,
 		WatchingSince:  p.CreatedAt,
 		LastDeployed:   p.DeployedAt,
 		LastChecked:    p.LastCheckedAt,
@@ -332,7 +336,7 @@ func (d *Daemon) find(ctx context.Context, name string) (projects.Project, error
 	return p, nil
 }
 
-func (d *Daemon) Deploy(ctx context.Context, name string) error {
+func (d *Daemon) Deploy(ctx context.Context, name string, version string) error {
 	_, o, err := d.parts()
 	if err != nil {
 		return err
@@ -340,7 +344,7 @@ func (d *Daemon) Deploy(ctx context.Context, name string) error {
 	if _, err := d.find(ctx, name); err != nil {
 		return err
 	}
-	return deployError(name, o.Deploy(ctx, name))
+	return deployError(name, o.Deploy(ctx, name, version))
 }
 
 func (d *Daemon) Retry(ctx context.Context, name string) error {
@@ -468,21 +472,44 @@ func (d *Daemon) Report(ctx context.Context, name string, n int) (control.Deploy
 
 func toDeployment(d projects.Deployment) control.Deployment {
 	return control.Deployment{
-		Commit: d.SHA, Trigger: d.Trigger, Status: d.Status, FailureKind: d.FailureKind, FailedStep: d.FailedStep,
+		Commit: d.SHA, Version: d.Version, Trigger: d.Trigger, Status: d.Status, FailureKind: d.FailureKind, FailedStep: d.FailedStep,
 		StartedAt: d.StartedAt, FinishedAt: d.FinishedAt, Error: d.Error,
 	}
 }
 
+// Start, Stop and Restart a project (or one service). A whole project
+// stopped stays down, on purpose: checks don't deploy it and the reconcile
+// loop doesn't bring it back, until it's started, restarted or deployed.
 func (d *Daemon) Start(ctx context.Context, target string) error {
-	return d.containerAction(ctx, target, "start", d.containers.Start)
+	return d.stopped(ctx, target, false, d.containerAction(ctx, target, "start", d.containers.Start))
 }
 
 func (d *Daemon) Stop(ctx context.Context, target string) error {
-	return d.containerAction(ctx, target, "stop", d.containers.Stop)
+	return d.stopped(ctx, target, true, d.containerAction(ctx, target, "stop", d.containers.Stop))
 }
 
 func (d *Daemon) Restart(ctx context.Context, target string) error {
-	return d.containerAction(ctx, target, "restart", d.containers.Restart)
+	return d.stopped(ctx, target, false, d.containerAction(ctx, target, "restart", d.containers.Restart))
+}
+
+// stopped records whether a whole project was stopped on purpose, after the
+// action (err) worked.
+func (d *Daemon) stopped(ctx context.Context, target string, stopped bool, err error) error {
+	if err != nil || strings.Contains(target, ":") {
+		return err
+	}
+	p, err := d.find(ctx, target)
+	if err != nil {
+		return err
+	}
+	if p.Stopped == stopped {
+		return nil
+	}
+	store, _, err := d.parts()
+	if err != nil {
+		return err
+	}
+	return store.SetStopped(ctx, p.Name, stopped)
 }
 
 // targets resolves "<project>" (every container) or "<project>:<service>"

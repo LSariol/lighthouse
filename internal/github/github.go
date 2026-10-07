@@ -91,8 +91,13 @@ func (e *Error) Temporary() bool {
 		e.Status == http.StatusForbidden && strings.Contains(e.Err.Error(), "rate limit")
 }
 
+// ErrNotModified means GitHub's answer hasn't changed since the ETag given.
+// Such a request doesn't count against the rate limit.
+var ErrNotModified = errors.New("not modified")
+
 // get sends an authenticated GET and returns the response if it's 200 OK.
-func (c Client) get(ctx context.Context, url string, token string, accept string) (*http.Response, error) {
+// With an etag, a 304 (unchanged) is ErrNotModified.
+func (c Client) get(ctx context.Context, url string, token string, accept string, etag string) (*http.Response, error) {
 	if token == "" {
 		return nil, &Error{Err: errors.New("no GitHub token yet (Lighthouse is still waiting for Cove)")}
 	}
@@ -103,10 +108,17 @@ func (c Client) get(ctx context.Context, url string, token string, accept string
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, &Error{Err: err}
+	}
+	if resp.StatusCode == http.StatusNotModified && etag != "" {
+		resp.Body.Close()
+		return nil, ErrNotModified
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
@@ -123,9 +135,16 @@ func (c Client) get(ctx context.Context, url string, token string, accept string
 
 // LatestCommit returns the newest commit on the repository's default branch.
 func (c Client) LatestCommit(ctx context.Context, repo Repo, token string) (string, error) {
-	resp, err := c.get(ctx, c.url(repo, "/commits?per_page=1"), token, "application/vnd.github+json")
+	sha, _, err := c.CheckCommit(ctx, repo, token, "")
+	return sha, err
+}
+
+// CheckCommit is LatestCommit for polling: given the ETag of the last
+// answer, it returns ErrNotModified if nothing changed, and the new ETag.
+func (c Client) CheckCommit(ctx context.Context, repo Repo, token string, etag string) (string, string, error) {
+	resp, err := c.get(ctx, c.url(repo, "/commits?per_page=1"), token, "application/vnd.github+json", etag)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 
@@ -133,21 +152,104 @@ func (c Client) LatestCommit(ctx context.Context, repo Repo, token string) (stri
 		SHA string `json:"sha"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&commits); err != nil {
-		return "", &Error{Status: resp.StatusCode, Err: fmt.Errorf("unexpected response: %v", err)}
+		return "", "", &Error{Status: resp.StatusCode, Err: fmt.Errorf("unexpected response: %v", err)}
 	}
 	if len(commits) == 0 || commits[0].SHA == "" {
-		return "", &Error{Status: http.StatusNotFound, Err: errors.New("the repository has no commits")}
+		return "", "", &Error{Status: http.StatusNotFound, Err: errors.New("the repository has no commits")}
 	}
-	return commits[0].SHA, nil
+	return commits[0].SHA, resp.Header.Get("ETag"), nil
 }
 
 // Archive returns the repository's files at commit sha, as a gzipped tarball
 // whose entries all sit in one top-level folder. The caller closes it. It
 // works for private repositories the token can read.
 func (c Client) Archive(ctx context.Context, repo Repo, sha string, token string) (io.ReadCloser, error) {
-	resp, err := c.get(ctx, c.url(repo, "/tarball/"+sha), token, "application/vnd.github+json")
+	resp, err := c.get(ctx, c.url(repo, "/tarball/"+sha), token, "application/vnd.github+json", "")
 	if err != nil {
 		return nil, err
 	}
 	return resp.Body, nil
+}
+
+// Tag is a tag and the commit it points at.
+type Tag struct {
+	Name string
+	SHA  string
+}
+
+// maxTagPages caps how many pages of 100 tags are read.
+const maxTagPages = 10
+
+// Tags lists the repository's tags, with the commit each points at
+// (annotated tags included). Given the ETag of the last answer, it returns
+// ErrNotModified if the first page hasn't changed.
+func (c Client) Tags(ctx context.Context, repo Repo, token string, etag string) ([]Tag, string, error) {
+	url := c.url(repo, "/tags?per_page=100")
+	var tags []Tag
+	newETag := ""
+	for page := 0; page < maxTagPages && url != ""; page++ {
+		pageETag := ""
+		if page == 0 {
+			pageETag = etag
+		}
+		resp, err := c.get(ctx, url, token, "application/vnd.github+json", pageETag)
+		if err != nil {
+			return nil, "", err
+		}
+		if page == 0 {
+			newETag = resp.Header.Get("ETag")
+		}
+		var list []struct {
+			Name   string `json:"name"`
+			Commit struct {
+				SHA string `json:"sha"`
+			} `json:"commit"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&list)
+		resp.Body.Close()
+		if err != nil {
+			return nil, "", &Error{Status: resp.StatusCode, Err: fmt.Errorf("unexpected response: %v", err)}
+		}
+		for _, t := range list {
+			tags = append(tags, Tag{Name: t.Name, SHA: t.Commit.SHA})
+		}
+		url = nextPage(resp.Header.Get("Link"))
+	}
+	return tags, newETag, nil
+}
+
+// nextPage finds the rel="next" URL in a Link header.
+func nextPage(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		url, rel, ok := strings.Cut(part, ";")
+		if ok && strings.Contains(rel, `rel="next"`) {
+			return strings.Trim(strings.TrimSpace(url), "<>")
+		}
+	}
+	return ""
+}
+
+// ComposeFiles are the names Compose looks for, in its order.
+var ComposeFiles = []string{"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"}
+
+// ComposeFile returns the compose file at the top of the repository at a
+// commit, and its name, without downloading the rest.
+func (c Client) ComposeFile(ctx context.Context, repo Repo, sha string, token string) (string, []byte, error) {
+	for _, name := range ComposeFiles {
+		resp, err := c.get(ctx, c.url(repo, "/contents/"+name+"?ref="+sha), token, "application/vnd.github.raw+json", "")
+		var gh *Error
+		if errors.As(err, &gh) && gh.Status == http.StatusNotFound {
+			continue
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		text, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if err != nil {
+			return "", nil, &Error{Err: err}
+		}
+		return name, text, nil
+	}
+	return "", nil, &Error{Status: http.StatusNotFound, Err: fmt.Errorf("no compose file at the top of the repository (%s)", strings.Join(ComposeFiles, ", "))}
 }

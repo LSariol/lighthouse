@@ -23,12 +23,18 @@ type Project struct {
 	// (`name:`). It's learned at each deploy; "" until the first one.
 	ComposeProject string
 
-	DeployedSHA   string // the commit last deployed successfully, or ""
-	DeployedAt    *time.Time
-	LastCheckedAt *time.Time
-	Checks        int64
-	LastError     string // the last check's or deploy's error, or "" if it worked
-	LastErrorAt   *time.Time
+	DeployedSHA string // the commit last deployed successfully, or ""
+	// DeployedVersion is the release deployed (v1.2.3), for a project that
+	// deploys version tags; "" otherwise.
+	DeployedVersion string
+	// HighestVersion is the highest release ever deployed successfully.
+	// Checks only deploy a newer one, so going back by hand sticks.
+	HighestVersion string
+	DeployedAt     *time.Time
+	LastCheckedAt  *time.Time
+	Checks         int64
+	LastError      string // the last check's or deploy's error, or "" if it worked
+	LastErrorAt    *time.Time
 
 	// FailureCount is how many deploys of FailingSHA in a row failed for a
 	// reason retrying can't fix. At BrokenAfter, Broken is set: the commit
@@ -36,6 +42,16 @@ type Project struct {
 	FailureCount int
 	FailingSHA   string
 	Broken       bool
+
+	// Mode and Tier are the settings from the compose file's x-lighthouse
+	// block (internal/settings), as last read: "branch" or "releases", and
+	// "data", "infra" or "app".
+	Mode string
+	Tier string
+
+	// Stopped is set by `stop` and cleared by `start` or a deploy: the
+	// reconcile loop leaves a stopped project down, and checks don't deploy it.
+	Stopped bool
 }
 
 // ComposeName is the compose project Lighthouse manages for p: the one its
@@ -56,7 +72,8 @@ const BrokenAfter = 3
 type Deployment struct {
 	Project     string // the project's name
 	SHA         string // the commit deployed
-	Trigger     string // TriggerCheck or TriggerManual
+	Version     string // the release deployed (v1.2.3), or "" for a commit on the branch
+	Trigger     string // TriggerCheck, TriggerManual or TriggerReconcile
 	Status      string // StatusSucceeded, StatusFailed or StatusRolledBack
 	FailureKind string // for a failure: FailureTransient or FailurePermanent
 	FailedStep  string // for a failure: the step that failed
@@ -76,8 +93,9 @@ type Step struct {
 }
 
 const (
-	TriggerCheck  = "check"  // a new commit found by a scheduled or manual scan
-	TriggerManual = "manual" // `deploy <name>` or `retry <name>`
+	TriggerCheck     = "check"     // a new commit found by a scheduled or manual scan
+	TriggerManual    = "manual"    // `deploy <name>` or `retry <name>`
+	TriggerReconcile = "reconcile" // the reconcile loop brought a project that was down back
 
 	StatusSucceeded  = "succeeded"
 	StatusFailed     = "failed"      // nothing changed: the running version kept serving
@@ -125,12 +143,20 @@ type Store interface {
 	// file names. ErrComposeProjectTaken if another project has it.
 	SetComposeProject(ctx context.Context, name string, composeProject string) error
 
+	// SetSettings records the project's x-lighthouse settings: its deploy
+	// mode ("branch" or "releases") and tier ("data", "infra" or "app").
+	SetSettings(ctx context.Context, name string, mode string, tier string) error
+
+	// SetStopped records whether the project was stopped on purpose.
+	SetStopped(ctx context.Context, name string, stopped bool) error
+
 	// RecordCheck notes that the project was checked; checkErr (nil if it
 	// worked) becomes its last error.
 	RecordCheck(ctx context.Context, name string, checkErr error) error
 
 	// RecordDeployment adds d, with its steps, to the project's history.
-	// A success becomes the deployed commit and clears the last error and
+	// A success becomes the deployed commit (and version, which also raises
+	// HighestVersion if it's higher) and clears the last error and
 	// the failure count. A failure becomes the last error; a permanent one
 	// counts toward BrokenAfter (counting restarts with a new commit).
 	RecordDeployment(ctx context.Context, d Deployment) error
