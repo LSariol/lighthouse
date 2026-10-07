@@ -1431,6 +1431,15 @@ A project's nickname, its repository, its compose project and its containers are
 - **Infrastructure deploys don't wait for approval:** sparkdb is backed up, then deploys go one at a time, data → infra → apps. sparkdb comes back under Lighthouse once v1.0.0 is deployed.
 - **Policy exceptions live in `policy.json`** in Lighthouse's own repository, built into the binary: reviewed in git, deployed like everything else ([§7.1](#71-the-deploy-rules)). Not in the database, and there's no CLI to change them.
 
+### 16.11 After v1.0.0 (decided 2026-10-06)
+
+Not part of the release; the first things after it.
+
+1. **A full infrastructure review**, documented: the server, the `spark` network, sparkdb, Cove, cloudflared, Lighthouse, and how projects plug in.
+2. **A clean `docker-compose.yml` example**, every line explained: the contract (§7), the deploy rules (§7.1), `x-lighthouse` (§7.2), secrets, data, healthchecks, names on `spark`, the test stage.
+3. **An "infrastructure dependencies" file**: a short version of all of the above, every rule a line with a link to its full section. It's what an agent (or a person) gets to make a project compliant.
+4. **Containers that don't run as root.** Cove runs as user `10001` and its data folder is owned by that user (a `chown` by hand). For watched projects: the `check` step could warn about a service that runs as root, and Lighthouse could create `/srv/server/storage/<compose project>/` owned by the image's user on the first deploy, so nobody has to `chown` by hand (Docker otherwise creates a missing folder owned by root).
+
 ---
 
 ## 17. Housekeeping
