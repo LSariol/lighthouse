@@ -11,10 +11,8 @@ import (
 	"golang.org/x/term"
 )
 
-// runTerminal runs the prompt with line editing: arrow keys, history (up/down)
-// and Tab completion of command and project names. It returns false if stdin
-// can't be switched to raw mode, so the caller falls back to plain input.
-// Ctrl+D or Ctrl+C on the prompt leaves the shell.
+// runTerminal runs the prompt with line editing: arrow keys, history
+// (up/down) and Tab completion of command and project names.
 func (c *CLI) runTerminal(ctx context.Context) bool {
 	fd := int(os.Stdin.Fd())
 
@@ -30,8 +28,6 @@ func (c *CLI) runTerminal(ctx context.Context) bool {
 	}{os.Stdin, os.Stderr}, c.prompt)
 	c.term.AutoCompleteCallback = c.complete
 
-	// In raw mode, output has to go through the terminal, which also turns
-	// "\n" into the "\r\n" a raw terminal needs.
 	oldOut, oldErr := stdout, stderr
 	stdout, stderr = c.term, c.term
 	defer func() { stdout, stderr = oldOut, oldErr }()
@@ -51,10 +47,7 @@ func (c *CLI) runTerminal(ctx context.Context) bool {
 	return true
 }
 
-// complete handles Tab. The first word completes to a command name; the word
-// after a command completes to whatever that command takes (project names,
-// "all", help topics). With one match the word is completed; with several,
-// their common prefix is, and pressing Tab again lists them.
+// complete handles Tab.
 func (c *CLI) complete(line string, pos int, key rune) (string, int, bool) {
 	if key != '\t' {
 		return "", 0, false
@@ -93,7 +86,6 @@ func (c *CLI) complete(line string, pos int, key rune) (string, int, bool) {
 	if len(matches) == 1 {
 		completed += " "
 	} else if len(completed) <= len(word) {
-		// Nothing more to complete: show the options instead.
 		if c.term != nil {
 			c.term.Write([]byte(strings.Join(matches, "  ") + "\n"))
 		}

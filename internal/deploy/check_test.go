@@ -61,7 +61,6 @@ func TestCheckException(t *testing.T) {
 }
 
 func TestCheckSecretsAndNames(t *testing.T) {
-	// Another project's key: refused before Cove is asked for anything.
 	e := newEnv(t)
 	e.compose.vars = append(e.compose.vars, compose.Variable{Name: "BOTSUITE_COVE_TOKEN"})
 	res := e.deploy(t, landing, sha1)
@@ -69,8 +68,6 @@ func TestCheckSecretsAndNames(t *testing.T) {
 		t.Errorf("another project's key: step %s, err %v, asked %v", res.FailedStep, res.Err, e.secrets.asked)
 	}
 
-	// A name another project's container has on spark; the project's own
-	// containers don't count.
 	e = newEnv(t)
 	e.compose.config = `{"services": {"web": {"container_name": "site", "networks": {"spark": null}}},
 		"networks": {"spark": {"name": "spark", "external": true}}}`
@@ -85,8 +82,6 @@ func TestCheckSecretsAndNames(t *testing.T) {
 }
 
 func TestCheckSeesTheFinalFolder(t *testing.T) {
-	// The config is read again once the files are in place, so its paths
-	// are the deploy folder's, not the download's.
 	e := newEnv(t)
 	var dirs []string
 	inner := e.compose
@@ -125,7 +120,6 @@ func TestTestStage(t *testing.T) {
 		t.Errorf("test stages built: %v, want %s", e.compose.stages, want)
 	}
 
-	// Failing tests stop the deploy before Cove is asked or anything is built.
 	e = newEnv(t)
 	e.source.archive = tarball(t, withStage)
 	e.compose.stageErr = errors.New("docker build --target test failed (exit status 1): FAIL")
@@ -137,7 +131,6 @@ func TestTestStage(t *testing.T) {
 		t.Error("went on after failing tests")
 	}
 
-	// Without a test stage, nothing runs.
 	e = newEnv(t)
 	res = e.deploy(t, landing, sha1)
 	if len(e.compose.stages) != 0 || !strings.Contains(res.Steps[3].Log, "no test stage") {
@@ -168,7 +161,6 @@ func TestDryCheck(t *testing.T) {
 		}
 	}
 
-	// A refused commit: the remaining check steps are skipped, nothing more.
 	e = newEnv(t)
 	e.compose.config = privilegedConfig
 	res = e.d.Check(context.Background(), Request{Project: landing, SHA: sha1, Token: "t"})
@@ -191,7 +183,6 @@ func TestBackup(t *testing.T) {
 		return e
 	}
 
-	// The first deploy: nothing runs yet, so there's nothing to back up.
 	e := newBackupEnv()
 	res := e.deploy(t, landing, sha1)
 	if res.Status != projects.StatusSucceeded || res.Settings.Tier != "data" || len(e.compose.execs) != 0 {
@@ -201,7 +192,6 @@ func TestBackup(t *testing.T) {
 		t.Errorf("backup log: %q", res.Steps[6].Log)
 	}
 
-	// The next one dumps the running database first, gzipped, owner-only.
 	e.docker.containers["website"][0].Name = "sparkdb"
 	p := landing
 	p.DeployedSHA = sha1
@@ -220,7 +210,6 @@ func TestBackup(t *testing.T) {
 		t.Errorf("backup mode %v", info.Mode().Perm())
 	}
 
-	// A failed backup stops the deploy before the swap.
 	e = newBackupEnv()
 	e.docker.set("website", "db", "db-1", "pg", running)
 	e.docker.containers["website"][0].Name = "sparkdb"
@@ -230,7 +219,6 @@ func TestBackup(t *testing.T) {
 		t.Errorf("failed backup: step %s, kind %s, ups %v, %v", res.FailedStep, res.FailureKind, e.compose.ups, res.Err)
 	}
 
-	// Only the newest KeepBackups are kept.
 	dir := t.TempDir()
 	for i := 0; i < KeepBackups+2; i++ {
 		os.WriteFile(filepath.Join(dir, fmt.Sprintf("x-2026010%d-000000-abc.sql.gz", i)), nil, 0o600)
@@ -251,8 +239,6 @@ func TestBadSettings(t *testing.T) {
 }
 
 func TestRollbackWithoutCove(t *testing.T) {
-	// Swapping sparkdb takes Cove's database away: the rollback must not
-	// need Cove. The previous version's secrets were fetched before the swap.
 	e := newEnv(t)
 	p := deployed(t, e)
 	e.compose.up = func(dir string) {

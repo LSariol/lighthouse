@@ -53,7 +53,6 @@ func TestSelfDeployHandsOff(t *testing.T) {
 		t.Errorf("last step %+v", last)
 	}
 
-	// Not ready to record until the helper is done.
 	if ready, _ := e.d.HandOffs(); len(ready) != 0 {
 		t.Errorf("ready before the helper finished: %+v", ready)
 	}
@@ -73,7 +72,7 @@ func TestHelperSwapsAndVerifies(t *testing.T) {
 	e := newSelfEnv(t)
 	p := lighthouse
 	p.DeployedSHA = sha1
-	os.MkdirAll(filepath.Join(e.root, "lighthouse", sha1[:12]), 0o755) // the running version's files
+	os.MkdirAll(filepath.Join(e.root, "lighthouse", sha1[:12]), 0o755)
 	e.docker.set("lighthouse", "lighthouse", "lh-old", "img-old", healthy)
 	res := e.d.Deploy(context.Background(), Request{Project: p, SHA: sha2, Trigger: projects.TriggerManual})
 	if !res.HandedOff {
@@ -81,7 +80,6 @@ func TestHelperSwapsAndVerifies(t *testing.T) {
 	}
 	path := filepath.Join(e.root, ".self-update", sha2[:12]+".json")
 
-	// The helper (the new image) swaps; the new Lighthouse comes up healthy.
 	if err := e.d.FinishHandOff(context.Background(), path); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +120,6 @@ func TestHelperRollsBack(t *testing.T) {
 	e.docker.set("lighthouse", "lighthouse", "lh-old", "img-old", healthy)
 	e.d.Deploy(context.Background(), Request{Project: p, SHA: sha2})
 
-	// The new Lighthouse never becomes healthy; the old one is put back.
 	e.compose.up = func(dir string) {
 		if filepath.Base(dir) == sha2[:12] {
 			e.docker.set("lighthouse", "lighthouse", "lh-new", "img-new", docker.Detail{State: "running", Health: "unhealthy", RestartPolicy: "unless-stopped"})
@@ -144,9 +141,6 @@ func TestHelperRollsBack(t *testing.T) {
 }
 
 func TestHelperRollsBackWithoutTheOldFolder(t *testing.T) {
-	// The first self-update after Lighthouse was deployed by hand: the old
-	// version's folder isn't Lighthouse's, so the old image is put back and
-	// run with the new compose file.
 	e := newSelfEnv(t)
 	p := lighthouse
 	p.DeployedSHA = sha1
@@ -189,8 +183,6 @@ func TestHelperFailsToStart(t *testing.T) {
 }
 
 func TestOneHandOffAtATime(t *testing.T) {
-	// While the helper works, a second self-update is refused: the
-	// Lighthouse that starts during the swap mustn't update itself again.
 	e := newSelfEnv(t)
 	if res := e.d.Deploy(context.Background(), Request{Project: lighthouse, SHA: sha1}); !res.HandedOff {
 		t.Fatalf("first Deploy = %+v", res)
@@ -209,7 +201,6 @@ func TestOneHandOffAtATime(t *testing.T) {
 		t.Errorf("the refused deploy touched the helper's files: %v", err)
 	}
 
-	// Once the helper is done, it isn't in progress any more.
 	e.d.FinishHandOff(context.Background(), filepath.Join(e.root, ".self-update", sha1[:12]+".json"))
 	if e.d.HandOffInProgress("lighthouse") {
 		t.Error("still in progress after the helper finished")

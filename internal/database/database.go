@@ -1,6 +1,4 @@
-// Package database is Lighthouse's Postgres database (lighthouse_db on
-// sparkdb): the connection pool, the goose migrations built into the binary,
-// the startup schema check, and the projects.Store.
+// Package database is Lighthouse's Postgres store, with its built-in migrations.
 package database
 
 import (
@@ -46,16 +44,13 @@ func (d *Database) Close() {
 	d.pool.Close()
 }
 
-// IsUnreachable reports whether err means the database couldn't be reached
-// at all (down, restarting, wrong host), as opposed to an error from it.
-// Lighthouse waits and retries for the first kind.
+// IsUnreachable reports whether err means the database couldn't be reached at
+// all (down, restarting, wrong host), as opposed to an error from it.
 func IsUnreachable(err error) bool {
 	var connectErr *pgconn.ConnectError
 	if !errors.As(err, &connectErr) {
 		return false
 	}
-	// A refused password or a missing database is a real answer, not an
-	// outage: retrying won't help.
 	var pgErr *pgconn.PgError
 	return !errors.As(err, &pgErr)
 }

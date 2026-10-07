@@ -54,8 +54,6 @@ func (c *CLI) add(ctx context.Context, args []string) error {
 
 	project, err := c.svc.Add(ctx, name, url)
 
-	// The repository's name is taken by another project: on a terminal, offer
-	// to pick another one (the server explains which); otherwise just say so.
 	var ce *control.Error
 	for name == "" && errors.As(err, &ce) && ce.Kind == control.KindNameTaken {
 		if c.term == nil && !c.interactive {
@@ -86,8 +84,6 @@ func (c *CLI) remove(ctx context.Context, args []string) error {
 	}
 	name := rest[0]
 
-	// A project Lighthouse no longer watches would run on untracked, so its
-	// containers go too unless --keep says otherwise.
 	question := fmt.Sprintf("Stop watching %q, and stop and remove its containers?", name)
 	if keep {
 		question = fmt.Sprintf("Stop watching %q? Its containers keep running.", name)

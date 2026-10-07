@@ -28,9 +28,7 @@ func (r Repo) String() string { return r.Owner + "/" + r.Name }
 
 var namePart = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
-// ParseRepoURL accepts a GitHub repository URL in its common forms:
-// https://github.com/owner/repo, with or without "www.", a trailing slash or
-// ".git", or http://.
+// ParseRepoURL accepts https://github.com/owner/repo in its common forms.
 func ParseRepoURL(raw string) (Repo, error) {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimPrefix(s, "https://")
@@ -57,7 +55,7 @@ const DefaultAPI = "https://api.github.com"
 // and DefaultAPI; set HTTP for timeouts.
 type Client struct {
 	HTTP *http.Client
-	API  string // the API's base URL; tests point it at a fake
+	API  string
 }
 
 func (c Client) httpClient() *http.Client {
@@ -75,12 +73,10 @@ func (c Client) url(repo Repo, path string) string {
 	return strings.TrimRight(base, "/") + "/repos/" + repo.Owner + "/" + repo.Name + path
 }
 
-// Error is a failed GitHub request. Temporary reports whether trying again
-// later may work (GitHub or the network had a problem) or not (the
-// repository, the commit or the token is wrong).
+// Error is a failed GitHub request; Temporary says whether retrying may help.
 type Error struct {
-	Op     string // what was asked, e.g. "check LSariol/plop for its newest commit"
-	Status int    // the HTTP status, or 0 if no answer came
+	Op     string
+	Status int
 	Err    error
 }
 
@@ -103,7 +99,6 @@ func (e *Error) Temporary() bool {
 var ErrNotModified = errors.New("not modified")
 
 // get sends an authenticated GET and returns the response if it's 200 OK.
-// With an etag, a 304 (unchanged) is ErrNotModified.
 func (c Client) get(ctx context.Context, op string, url string, token string, accept string, etag string) (*http.Response, error) {
 	if token == "" {
 		return nil, &Error{Op: op, Err: errors.New("no GitHub token yet (Lighthouse is still waiting for Cove)")}
@@ -202,8 +197,7 @@ func (c Client) ResolveCommit(ctx context.Context, repo Repo, ref string, token 
 }
 
 // Archive returns the repository's files at commit sha, as a gzipped tarball
-// whose entries all sit in one top-level folder. The caller closes it. It
-// works for private repositories the token can read.
+// whose entries all sit in one top-level folder.
 func (c Client) Archive(ctx context.Context, repo Repo, sha string, token string) (io.ReadCloser, error) {
 	op := fmt.Sprintf("download %s at %.7s", repo, sha)
 	resp, err := c.get(ctx, op, c.url(repo, "/tarball/"+sha), token, "application/vnd.github+json", "")
@@ -222,9 +216,8 @@ type Tag struct {
 // maxTagPages caps how many pages of 100 tags are read.
 const maxTagPages = 10
 
-// Tags lists the repository's tags, with the commit each points at
-// (annotated tags included). Given the ETag of the last answer, it returns
-// ErrNotModified if the first page hasn't changed.
+// Tags lists the repository's tags, with the commit each points at (annotated
+// tags included).
 func (c Client) Tags(ctx context.Context, repo Repo, token string, etag string) ([]Tag, string, error) {
 	op := "list " + repo.String() + "'s tags"
 	page := c.url(repo, "/tags?per_page=100")

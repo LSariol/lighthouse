@@ -1,9 +1,6 @@
 name: lighthouse
 
-# Lighthouse deploys itself: only release tags (v1.2.3), and as infrastructure
-# (after sparkdb, before the apps). Its deploys hand off to the update helper
-# container, which swaps it and puts the old one back if the new one isn't
-# healthy. Its first deploy is by hand (DOCUMENTATION.md section 10).
+# Lighthouse deploys itself from release tags (DOCUMENTATION.md §4.6).
 x-lighthouse:
   deploy: releases
   tier: infra
@@ -15,62 +12,40 @@ services:
       dockerfile: Dockerfile
     container_name: lighthouse
     environment:
-      # Plain settings, written out: none of these are secrets. Its own
-      # secrets (the GitHub token and the database URLs) it reads from Cove
-      # at startup; this file must never need any (the update helper
-      # couldn't keep them).
+      # No secrets here: Lighthouse reads its own from Cove, and the update helper can't keep any.
       - APP_ENV=prod
-      # The release being deployed, given by Lighthouse to every deploy;
-      # "dev" when started by hand.
       - LIGHTHOUSE_VERSION=${LIGHTHOUSE_DEPLOY_VERSION:-dev}
       - COVE_URL=http://cove:2100
       - COVE_TOKEN_PATH=/app/vault/cove/token
-      # Deploy folders. Mounted at the same path on the host and in here, so a
-      # relative bind mount in a project's compose file means the same files
-      # to Compose (in this container) and to Docker (on the host).
       - STAGING_PATH=/srv/server/staging
-      # The projects' data folders: a project may mount host paths from
-      # its own folder here, <compose project>/, and nowhere else.
       - STORAGE_PATH=/srv/server/storage
-      # Database backups taken before deploying a project with
-      # x-lighthouse backup: postgres (sparkdb), <compose project>/...
       - BACKUP_PATH=/srv/backups
+    # Staging, storage and backups are mounted at the same path as on the host.
     volumes:
-      # Lighthouse's Cove token (written on first start by the bootstrap).
       - type: bind
         source: /srv/server/storage/lighthouse/cove
         target: /app/vault/cove
-      # Deploy folders (see STAGING_PATH): the same path on both sides.
       - type: bind
         source: /srv/server/staging
         target: /srv/server/staging
-      # The projects' data folders, read-only and at the same path, so the
-      # deploy rules can follow a symlink a container left in its folder.
       - type: bind
         source: /srv/server/storage
         target: /srv/server/storage
         read_only: true
-      # Database backups (see BACKUP_PATH), the same path on both sides.
       - type: bind
         source: /srv/backups
         target: /srv/backups
-      # Full control of the host's Docker: how Lighthouse deploys projects.
       - type: bind
         source: /var/run/docker.sock
         target: /var/run/docker.sock
-    # No terminal is attached: open the CLI with
-    #   docker exec -it lighthouse /lighthouse shell
     restart: unless-stopped
-    # Healthy once the daemon answers on its control socket. The update
-    # helper waits for this before keeping a new version.
     healthcheck:
       test: ["CMD", "/lighthouse", "health"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 10s
-    # A deploy that already replaced a project's containers finishes its
-    # health check (or rollback) before Lighthouse stops.
+    # Lets a deploy that already swapped finish its check before Lighthouse stops.
     stop_grace_period: 2m
     networks:
       - spark

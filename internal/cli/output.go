@@ -11,13 +11,7 @@ import (
 	"golang.org/x/term"
 )
 
-// Output follows the clig.dev conventions:
-//
-//   - Data (tables, logs, help) goes to stdout, uncolored, so it can be piped
-//     or captured: lighthouse list | grep plop.
-//   - Messages go to stderr, each marked with a symbol so the meaning doesn't
-//     depend on color: ✓ success, ! warning or wrong usage, ✗ error, ? question.
-//   - Color is only used when stderr is a terminal and NO_COLOR isn't set.
+// Data goes to stdout; messages go to stderr with a symbol (✓ ! ✗ ?), colored only on a terminal without NO_COLOR.
 var (
 	stdout   io.Writer = os.Stdout
 	stderr   io.Writer = os.Stderr
@@ -76,7 +70,7 @@ func ask(question string) {
 }
 
 // promptFor returns the prompt for an environment such as "dev" or "prod":
-// "lighthouse (dev)> ". Production is shown in red, so it's hard to mistake.
+// "lighthouse (dev)> ".
 func promptFor(env string) string {
 	env = strings.ToLower(strings.TrimSpace(env))
 	if env == "" {
@@ -90,8 +84,7 @@ func promptFor(env string) string {
 	return "lighthouse " + label + "> "
 }
 
-// table writes rows as aligned columns to stdout. The first row is the header,
-// in capitals (as Cove's tables).
+// table writes rows as aligned columns to stdout.
 func table(rows [][]string) {
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	for _, row := range rows {

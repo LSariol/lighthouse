@@ -26,9 +26,7 @@ const migrationsTable = "lighthouse.goose_db_version"
 // undefinedTable is Postgres's error code for a missing table.
 const undefinedTable = "42P01"
 
-// Migrate applies every pending migration. connString must log in as
-// lighthouse_migrator (LIGHTHOUSE_MIGRATOR_DATABASE_URL), which acts as
-// lighthouse_owner. A Postgres lock stops two Lighthouses migrating at once.
+// Migrate applies every pending migration.
 func Migrate(ctx context.Context, connString string) error {
 	provider, db, err := newProvider(ctx, connString)
 	if err != nil {
@@ -77,8 +75,7 @@ func newProvider(ctx context.Context, connString string) (*goose.Provider, *sql.
 		return nil, nil, fmt.Errorf("LIGHTHOUSE_MIGRATOR_DATABASE_URL isn't a valid connection string: %w", err)
 	}
 
-	// goose creates its version table before running any migration, so the
-	// schema that holds it has to exist first.
+	// goose writes its version table into the schema, so the schema must exist first.
 	if _, err := db.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS lighthouse"); err != nil {
 		db.Close()
 		return nil, nil, fmt.Errorf("database: prepare migrations with LIGHTHOUSE_MIGRATOR_DATABASE_URL: %w", err)
@@ -127,9 +124,7 @@ func (d *Database) SchemaVersion(ctx context.Context) (have int64, want int64, e
 }
 
 // CheckSchemaVersion refuses a database missing a migration this build needs,
-// so Lighthouse stops at startup instead of failing on its first query. A
-// newer database is fine: rolling back the code after an additive migration
-// still works.
+// so Lighthouse stops at startup instead of failing on its first query.
 func (d *Database) CheckSchemaVersion(ctx context.Context) error {
 	have, want, err := d.SchemaVersion(ctx)
 	if err != nil {

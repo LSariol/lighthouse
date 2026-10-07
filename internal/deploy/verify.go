@@ -15,14 +15,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/docker"
 )
 
-// verify waits until every service of the project is up:
-//   - with a healthcheck: healthy;
-//   - without one: running, and still running without a restart after the
-//     Stable time;
-//   - a one-off service (no restart policy): may also have exited with 0.
-//
-// It fails as soon as a service is unhealthy, exited with an error, or keeps
-// restarting, and when Verify runs out.
+// verify waits until every service is healthy, or stable without a healthcheck.
 func (r *run) verify(ctx context.Context, project compose.Project, out io.Writer) *failure {
 	deadline := time.Now().Add(r.d.timeouts.Verify)
 	stableSince := map[string]time.Time{} // container ID → first seen running
@@ -49,8 +42,7 @@ func (r *run) verify(ctx context.Context, project compose.Project, out io.Writer
 	}
 }
 
-// checkServices looks at every service once. It returns the ones not up yet
-// (with why), or a failure if one can't come up.
+// checkServices looks at every service once.
 func (r *run) checkServices(ctx context.Context, project compose.Project, stableSince map[string]time.Time, restarts map[string]int) ([]string, *failure) {
 	containers, err := r.d.docker.ProjectContainers(ctx, project.Name)
 	if err != nil {
@@ -99,7 +91,7 @@ func (r *run) serviceState(service string, id string, d docker.Detail, stableSin
 	case d.RestartCount > firstRestarts || d.State == "restarting":
 		return "", permanent(fmt.Errorf("%s keeps restarting (last exit code %d)", service, d.ExitCode))
 	case d.State == "exited" && oneOff && d.ExitCode == 0:
-		return "", nil // a job that finished
+		return "", nil
 	case d.State == "exited" || d.State == "dead":
 		return "", permanent(fmt.Errorf("%s stopped with exit code %d", service, d.ExitCode))
 	case d.State != "running":
@@ -110,7 +102,6 @@ func (r *run) serviceState(service string, id string, d docker.Detail, stableSin
 		return "health check starting", nil
 	}
 
-	// Running, without a healthcheck: up once it has stayed up long enough.
 	since, ok := stableSince[id]
 	if !ok {
 		since = time.Now()
@@ -122,17 +113,13 @@ func (r *run) serviceState(service string, id string, d docker.Detail, stableSin
 	return "", nil
 }
 
-// cleanup removes what this deploy made obsolete: deploy folders other than
-// the new one and the one it replaced, rollback tags of other commits, images
-// nothing uses any more, and build cache unused for a week (at most daily).
-// It never fails a deploy; problems are only reported.
+// cleanup removes old deploy folders, rollback tags, unused images and build cache.
 func (r *run) cleanup(ctx context.Context, project compose.Project, dir string, out io.Writer) {
 	keep := map[string]bool{short12(r.req.SHA): true}
 	if prev := r.req.Project.DeployedSHA; prev != "" {
 		keep[short12(prev)] = true
 	}
 
-	// Deploy folders.
 	entries, _ := os.ReadDir(filepath.Dir(dir))
 	var removed []string
 	for _, e := range entries {
@@ -149,7 +136,6 @@ func (r *run) cleanup(ctx context.Context, project compose.Project, dir string, 
 		fmt.Fprintf(out, "removed old deploy folders: %s\n", strings.Join(removed, ", "))
 	}
 
-	// Rollback tags of other commits.
 	for _, s := range project.Services {
 		if !s.Build {
 			continue

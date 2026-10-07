@@ -6,27 +6,20 @@ import (
 	"strings"
 )
 
-// command is one CLI command. run receives the full argument list, including
-// the command name in args[0]. It prints its own results and returns an error
-// for anything that went wrong; the caller shows the error.
+// command is one CLI command; run gets the full arguments, args[0] included.
 type command struct {
-	names []string // first is the primary name, the rest are aliases
+	names []string
 
-	// group and summary are what `help` shows: one line per command, under
-	// its group's heading. synopsis is the arguments shown on that line.
 	group    string
 	synopsis string
 	summary  string
 
-	// What `help <command>` shows, each as aligned columns.
 	usages   []usage
 	flags    []flag
 	examples []example
 
 	run func(c *CLI, ctx context.Context, args []string) error
 
-	// complete returns the Tab-completion candidates for the command's first
-	// argument, or is nil when it has none.
 	complete func(c *CLI) []string
 }
 
@@ -50,7 +43,7 @@ type example struct {
 
 // usageError is returned when a command is called with the wrong arguments.
 type usageError struct {
-	reason string // optional, e.g. `"x" isn't a number.`
+	reason string
 	form   string
 }
 
@@ -71,10 +64,7 @@ const (
 
 var groupOrder = []string{groupProjects, groupDeploying, groupContainers, groupLighthouse}
 
-// commandTable lists every command. Adding a command here makes it available
-// at the prompt, as a one-shot command, in help and in Tab completion.
-// embedded words `exit` for the CLI inside the daemon, where it stops
-// Lighthouse.
+// commandTable lists every command.
 func commandTable(embedded bool) []command {
 	exit := usage{"exit", "Leave the shell. Lighthouse keeps running and deploying."}
 	exitSummary := "Leave the shell (Lighthouse keeps running)"
@@ -562,7 +552,6 @@ func (c *CLI) overview() string {
 const helpWidth = 80
 
 // commandHelp is `help <command>`: a header, then usage, flags and examples.
-// Usage and flags share one description column; examples have their own.
 func commandHelp(cmd command) string {
 	var b strings.Builder
 
@@ -607,8 +596,7 @@ func columnWidth(rows [][2]string, maxLeft int) int {
 }
 
 // columns lays out rows as two columns: the left one indented by two spaces
-// and width wide, the right one wrapped to helpWidth. A left side wider than
-// width gets its own line, with its text below it in the right column.
+// and width wide, the right one wrapped to helpWidth.
 func columns(rows [][2]string, width int) string {
 	col := 2 + width + 3
 	pad := strings.Repeat(" ", col)

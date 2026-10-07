@@ -59,7 +59,6 @@ func TestInspect(t *testing.T) {
 	needCompose(t)
 	ctx := context.Background()
 
-	// Without `name:`, the project is named after its folder.
 	dir := filepath.Join(t.TempDir(), "0123456789ab")
 	writeCompose(t, dir, sample)
 	p, err := Runner{}.Inspect(ctx, dir)
@@ -83,13 +82,11 @@ func TestInspect(t *testing.T) {
 		t.Errorf("Config isn't the compose config: %.80s", p.Config)
 	}
 
-	// With `name:`, that's the name.
 	writeCompose(t, dir, "name: website\n"+sample)
 	if p, err := (Runner{}).Inspect(ctx, dir); err != nil || p.Name != "website" {
 		t.Errorf("with name: %q, %v", p.Name, err)
 	}
 
-	// A broken file is an error that says why.
 	writeCompose(t, dir, "services: [this is not a map")
 	if _, err := (Runner{}).Inspect(ctx, dir); err == nil || !strings.Contains(err.Error(), "config failed") {
 		t.Errorf("broken file: %v", err)
@@ -111,7 +108,6 @@ func TestVariables(t *testing.T) {
 		names = append(names, v.Name)
 		byName[v.Name] = v
 	}
-	// The escaped $${NOT_A_VARIABLE} isn't listed.
 	if !slices.Equal(names, []string{"LEVEL", "PLOP_DATABASE_PASSWORD", "PLOP_DATABASE_URL"}) {
 		t.Fatalf("variables = %v", names)
 	}

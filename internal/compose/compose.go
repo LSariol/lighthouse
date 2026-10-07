@@ -1,7 +1,4 @@
-// Package compose runs the docker compose commands a deploy needs. Every
-// command has a context (so it has a deadline and stops on shutdown) and runs
-// with a clean environment: only what docker itself needs, plus what the
-// caller passes. Lighthouse's own settings never reach a project.
+// Package compose runs docker compose with deadlines and a clean environment.
 package compose
 
 import (
@@ -19,23 +16,16 @@ import (
 
 // Project is what Lighthouse needs from a compose file.
 type Project struct {
-	// Name is the compose project's name: the file's `name:`, or, without
-	// one, the folder it's in.
 	Name     string
 	Services []Service
-	// Config is the whole config, as JSON, for the deploy rules (see
-	// internal/policy).
-	Config []byte
+	Config   []byte
 }
 
 // Service is one service of a compose project.
 type Service struct {
-	Name  string
-	Image string // the `image:` it names, or "" for a service that's only built
-	Build bool   // built from a Dockerfile
-	// Context and Dockerfile say what's built: the build context (a folder,
-	// or a Git URL) and the Dockerfile's path, absolute for a folder.
-	// Dockerfile is "" for an inline one.
+	Name       string
+	Image      string
+	Build      bool
 	Context    string
 	Dockerfile string
 }
@@ -52,13 +42,12 @@ func (s Service) ImageName(project string) string {
 // Variable is a ${...} variable a compose file uses.
 type Variable struct {
 	Name     string
-	Default  string // its default, e.g. "x" in ${NAME:-x}, or ""
-	Required bool   // ${NAME:?message}
+	Default  string
+	Required bool
 }
 
 // Runner runs docker compose.
 type Runner struct {
-	// Docker is the docker binary; "docker" if empty.
 	Docker string
 }
 
@@ -156,8 +145,7 @@ func (r Runner) Inspect(ctx context.Context, dir string) (Project, error) {
 	return p, nil
 }
 
-// Variables lists the ${...} variables the compose file in dir uses. An
-// escaped $${...} isn't one.
+// Variables lists the ${...} variables the compose file in dir uses.
 func (r Runner) Variables(ctx context.Context, dir string) ([]Variable, error) {
 	out, err := r.output(ctx, dir, "config", "--variables", "--format", "json")
 	if err != nil {
@@ -181,14 +169,13 @@ func (r Runner) Variables(ctx context.Context, dir string) ([]Variable, error) {
 	return vars, nil
 }
 
-// Build builds the project's images. env holds its variables (KEY=value).
+// Build builds the project's images.
 func (r Runner) Build(ctx context.Context, dir string, project string, env []string, out io.Writer) error {
 	return r.run(ctx, dir, env, out, "-p", project, "build")
 }
 
 // BuildStage builds one stage of a Dockerfile, e.g. its test stage, with
-// nothing from the compose file: no build arguments and no secrets. Its
-// output goes to out.
+// nothing from the compose file: no build arguments and no secrets.
 func (r Runner) BuildStage(ctx context.Context, buildContext string, dockerfile string, target string, out io.Writer) error {
 	bin := r.Docker
 	if bin == "" {
@@ -208,8 +195,8 @@ func (r Runner) BuildStage(ctx context.Context, buildContext string, dockerfile 
 	return nil
 }
 
-// Exec runs a command in a running container, sending its standard output
-// to stdout (e.g. a database dump). Its errors end up in the error.
+// Exec runs a command in a running container, sending its standard output to
+// stdout (e.g. a database dump).
 func (r Runner) Exec(ctx context.Context, container string, command []string, stdout io.Writer) error {
 	bin := r.Docker
 	if bin == "" {
@@ -228,11 +215,7 @@ func (r Runner) Exec(ctx context.Context, container string, command []string, st
 	return nil
 }
 
-// RunDetached starts a container in the background: docker run -d --name
-// name -v volume... image command... (e.g. the self-update helper). An image
-// built by Compose carries its project's labels, which a container inherits;
-// they're cleared, so the container isn't taken for one of the project's
-// services.
+// RunDetached starts a container in the background, without Compose labels.
 func (r Runner) RunDetached(ctx context.Context, name string, image string, volumes []string, command []string) error {
 	args := []string{"run", "-d", "--name", name,
 		"--label", "com.docker.compose.project=", "--label", "com.docker.compose.service="}
@@ -279,16 +262,12 @@ func (r Runner) Up(ctx context.Context, dir string, project string, env []string
 	return r.run(ctx, dir, env, out, "-p", project, "up", "-d", "--no-build", "--remove-orphans")
 }
 
-// Down stops and removes the project's containers and networks. It needs no
-// compose file: Compose finds them by their labels. dir must be a folder
-// without a compose file (Compose would read one).
+// Down stops and removes the project's containers and networks.
 func (r Runner) Down(ctx context.Context, dir string, project string, out io.Writer) error {
 	return r.run(ctx, dir, nil, out, "-p", project, "down")
 }
 
-// baseVars are the environment variables docker and compose themselves need,
-// on Linux and on Windows. Everything else in Lighthouse's environment stays
-// out of a project's reach.
+// baseVars is the environment docker needs; nothing else of Lighthouse's reaches a project.
 var baseVars = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "TMPDIR": true, "TMP": true, "TEMP": true,
 	"DOCKER_HOST": true, "DOCKER_CONFIG": true, "DOCKER_CONTEXT": true, "DOCKER_CERT_PATH": true, "DOCKER_TLS_VERIFY": true,

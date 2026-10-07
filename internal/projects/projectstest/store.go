@@ -1,6 +1,4 @@
-// Package projectstest has an in-memory projects.Store for tests, and the
-// tests every Store must pass (RunStoreTests), so the in-memory one and the
-// Postgres one behave the same.
+// Package projectstest has an in-memory Store and the tests every Store must pass.
 package projectstest
 
 import (
@@ -19,7 +17,7 @@ import (
 type Store struct {
 	mu          sync.Mutex
 	projects    []projects.Project
-	deployments []projects.Deployment // oldest first
+	deployments []projects.Deployment
 }
 
 var _ projects.Store = (*Store)(nil)
@@ -86,7 +84,6 @@ func (s *Store) Remove(ctx context.Context, name string) error {
 	removed := s.projects[i].Name
 	s.projects = append(s.projects[:i], s.projects[i+1:]...)
 
-	// Its history goes with it.
 	kept := s.deployments[:0]
 	for _, d := range s.deployments {
 		if d.Project != removed {
@@ -253,7 +250,7 @@ func (s *Store) ClearFailures(ctx context.Context, name string) error {
 	return nil
 }
 
-// newest returns the project's deployments, newest first. s.mu must be held.
+// newest returns the project's deployments, newest first.
 func (s *Store) newest(project string) []projects.Deployment {
 	var list []projects.Deployment
 	for k := len(s.deployments) - 1; k >= 0; k-- {

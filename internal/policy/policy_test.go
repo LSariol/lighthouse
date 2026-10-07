@@ -150,8 +150,6 @@ func TestEachRuleRefuses(t *testing.T) {
 }
 
 func TestServiceNameOnSpark(t *testing.T) {
-	// Compose adds a service's name to its networks: a service called "db"
-	// on spark answers to the name sparkdb's service has.
 	s := newSetup(t)
 	c := []byte(`{"name":"site","services":{"db":{"image":"postgres","networks":{"spark":null}},"cove":{"image":"x"}},
 		"networks":{"spark":{"name":"spark","external":true},"default":{"name":"site_default"}}}`)
@@ -185,7 +183,6 @@ func TestPortsWarnOnly(t *testing.T) {
 
 func TestSymlinkOutOfOwnFolders(t *testing.T) {
 	s := newSetup(t)
-	// A link the repository (or a container, in its data folder) left behind.
 	resolve := func(p string) string {
 		if p == filepath.Join(s.dir, "data") || p == filepath.Join(s.storage, "site", "evil") {
 			return filepath.Clean("/")
@@ -247,11 +244,11 @@ func TestExceptions(t *testing.T) {
 
 func TestParseRefusesSloppyPolicies(t *testing.T) {
 	for _, bad := range []string{
-		`{"exceptions": [{"project": "x", "allow": ["privileged"]}]}`,       // no reason
-		`{"exceptions": [{"project": "x", "allow": [], "reason": "r"}]}`,    // nothing allowed
-		`{"exceptions": [{"project": "x", "allow": ["*"], "reason": "r"}]}`, // everything
+		`{"exceptions": [{"project": "x", "allow": ["privileged"]}]}`,
+		`{"exceptions": [{"project": "x", "allow": [], "reason": "r"}]}`,
+		`{"exceptions": [{"project": "x", "allow": ["*"], "reason": "r"}]}`,
 		`{"exceptions": [{"project": "Bad Name", "allow": ["privileged"], "reason": "r"}]}`,
-		`{"exceptions": [{"project": "x", "alow": ["privileged"], "reason": "r"}]}`, // typo
+		`{"exceptions": [{"project": "x", "alow": ["privileged"], "reason": "r"}]}`,
 		`{"exception": []}`,
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {

@@ -8,9 +8,7 @@ import (
 	"time"
 )
 
-// status prints Lighthouse's health and every project's state, and returns an
-// error (so a one-shot `lighthouse status` exits non-zero) when something
-// needs attention.
+// status prints Lighthouse's health and each project's state; it fails when something needs attention.
 func (c *CLI) status(ctx context.Context, args []string) error {
 	if len(args) != 1 {
 		return usageError{form: "status"}

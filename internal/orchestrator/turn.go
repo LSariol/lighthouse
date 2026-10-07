@@ -5,10 +5,7 @@ import (
 	"sync"
 )
 
-// turn lets one deploy run at a time and decides who goes next: the lowest
-// order (data, then infra, then apps), then whoever asked first. Checks, the
-// CLI and the reconcile loop all wait here, so a database that has to come
-// back goes before the next app's deploy.
+// turn runs one deploy at a time: lowest tier first, then first come.
 type turn struct {
 	mu      sync.Mutex
 	busy    bool
@@ -22,8 +19,7 @@ type waiter struct {
 	ready chan struct{}
 }
 
-// acquire waits for this caller's turn. It returns ctx's error if ctx ends
-// first, without the turn.
+// acquire waits for this caller's turn.
 func (t *turn) acquire(ctx context.Context, order int) error {
 	t.mu.Lock()
 	if !t.busy && len(t.waiting) == 0 {
@@ -61,7 +57,7 @@ func (t *turn) release() {
 	t.handOff()
 }
 
-// handOff gives the turn to the best waiter, or frees it. t.mu is held.
+// handOff gives the turn to the best waiter, or frees it.
 func (t *turn) handOff() {
 	if len(t.waiting) == 0 {
 		t.busy = false

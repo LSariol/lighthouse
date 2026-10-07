@@ -1,26 +1,4 @@
-// Package deploy deploys one commit of a project, building first and
-// swapping last: everything that can fail happens while the running version
-// keeps serving, and if the new version doesn't come up healthy, the previous
-// one is put back.
-//
-//	fetch    download the exact commit through the GitHub API and unpack it
-//	inspect  read the compose file: its project name, services, variables
-//	check    the deploy rules (internal/policy): nothing that reaches outside
-//	         the project, its own secrets only, no name taken on spark
-//	test     the Dockerfile's test stage, if it has one
-//	secrets  fetch every ${KEY} without a default from Cove, in one request
-//	build    build the images; tag the running ones for rollback first
-//	backup   for a project with x-lighthouse backup: postgres, a pg_dumpall of
-//	         the running database; and the previous version's secrets, so a
-//	         rollback doesn't need Cove (whose database may be what's swapped)
-//	swap     docker compose up: the only moment of downtime
-//	verify   wait until every service is healthy (or stable); else roll back
-//	cleanup  old deploy folders, old rollback tags, unused images and cache
-//
-// Every step's output is kept (the tail, with secret values hidden) and
-// returned in the Result, and also written to the log as it happens.
-//
-// Check runs the steps up to test as a dry run, changing nothing.
+// Package deploy deploys a commit: build first, swap last, roll back if it isn't healthy.
 package deploy
 
 import (
@@ -83,11 +61,11 @@ type Secrets interface {
 
 // Timeouts limit each step.
 type Timeouts struct {
-	Fetch  time.Duration // download and unpack
+	Fetch  time.Duration
 	Build  time.Duration
-	Swap   time.Duration // docker compose up
-	Verify time.Duration // how long services may take to become healthy
-	Stable time.Duration // how long a service without a healthcheck must stay up
+	Swap   time.Duration
+	Verify time.Duration
+	Stable time.Duration
 }
 
 // DefaultTimeouts are used for any Timeouts field left zero.
@@ -101,29 +79,14 @@ var DefaultTimeouts = Timeouts{
 
 // Options configure a Deployer.
 type Options struct {
-	// Root holds a folder per compose project, with a folder per deployed
-	// commit. In Docker it must be mounted at the same path on the host,
-	// so a relative bind mount in a project's compose file resolves to the
-	// same files for Compose (in Lighthouse's container) and Docker (on the
-	// host).
-	Root string
-	// Storage is the root of the projects' data folders: a project may
-	// mount host paths from Storage/<compose project>/ (and its own files).
-	Storage string
-	// Policy holds the exceptions to the deploy rules (policy.json).
-	Policy policy.Policy
-	// Self is Lighthouse's own compose project, "" when it doesn't run in
-	// Docker. Its deploys hand off to the update helper (selfupdate.go).
-	Self string
-	// Backups is where database backups go: <Backups>/<compose project>/.
-	// The newest KeepBackups of each project are kept.
+	Root     string
+	Storage  string
+	Policy   policy.Policy
+	Self     string
 	Backups  string
 	Timeouts Timeouts
-	// Log receives every step's output as it happens (secret values hidden).
-	// Nothing if nil.
-	Log io.Writer
-	// Poll is how often verify looks at the containers; 2 s if zero.
-	Poll time.Duration
+	Log      io.Writer
+	Poll     time.Duration
 }
 
 // Deployer runs deploys, one at a time.
@@ -173,32 +136,24 @@ func New(c Compose, d Docker, s Source, sec Secrets, opts Options) *Deployer {
 // Request is one deploy.
 type Request struct {
 	Project projects.Project
-	SHA     string // the commit to deploy
-	Version string // the release it is (v1.2.3), or "" for a commit on the branch
-	Trigger string // what started it (projects.Trigger*), kept with a self-update's hand-off
-	Token   string // GitHub token, for the download
+	SHA     string
+	Version string
+	Trigger string
+	Token   string
 
-	// Claim is called with the compose project the compose file names, before
-	// anything changes. An error (e.g. another project has it) stops the
-	// deploy. The orchestrator records it in the store (for a Check, it only
-	// looks).
 	Claim func(ctx context.Context, composeProject string) error
 }
 
 // Result is how a deploy went.
 type Result struct {
-	Status         string // projects.StatusSucceeded, StatusFailed or StatusRolledBack
-	FailureKind    string // projects.FailureTransient or FailurePermanent, for a failure
+	Status         string
+	FailureKind    string
 	FailedStep     string
-	ComposeProject string // as the compose file names it, once inspected
-	// Settings are the commit's x-lighthouse settings, once inspected.
-	Settings settings.Settings
-	// HandedOff means this was Lighthouse's own deploy, now in the update
-	// helper's hands: nothing is recorded yet (HandOffs has it later), and
-	// this Lighthouse is about to be replaced.
-	HandedOff bool
-	Steps     []projects.Step
-	Err       error // nil on success
+	ComposeProject string
+	Settings       settings.Settings
+	HandedOff      bool
+	Steps          []projects.Step
+	Err            error
 }
 
 // The steps, in order.
@@ -231,24 +186,21 @@ func permanent(err error) *failure { return &failure{projects.FailurePermanent, 
 
 // run is one deploy in progress.
 type run struct {
-	d        *Deployer
-	req      Request
-	log      *slog.Logger
-	steps    []projects.Step
-	scrub    *scrubber // hides secret values in output, once they're known
-	stepLog  *tail
-	previous map[string]string // service → image ID running before the swap
-	prevEnv  []string          // the previous version's secrets, fetched before the swap
-	settings settings.Settings // the commit's x-lighthouse settings
-	started  time.Time
-	// fallbackDir is where a rollback runs when the previous version's
-	// folder isn't kept (the update helper: the new folder, with the
-	// previous images put back).
+	d           *Deployer
+	req         Request
+	log         *slog.Logger
+	steps       []projects.Step
+	scrub       *scrubber
+	stepLog     *tail
+	previous    map[string]string
+	prevEnv     []string
+	settings    settings.Settings
+	started     time.Time
 	fallbackDir string
-	dry         bool // Check: change nothing, stop after the test step
+	dry         bool
 }
 
-// Deploy deploys req.Project at req.SHA. A second call waits for the first.
+// Deploy deploys req.Project at req.SHA.
 func (d *Deployer) Deploy(ctx context.Context, req Request) Result {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -269,9 +221,7 @@ func (d *Deployer) Deploy(ctx context.Context, req Request) Result {
 	return res
 }
 
-// Check runs a deploy's first steps (fetch, inspect, check, test) as a dry
-// run: nothing is claimed, moved into place, built or started, and the
-// download is deleted afterwards. A second call waits for a running deploy.
+// Check runs fetch, inspect, check and test as a dry run, changing nothing.
 func (d *Deployer) Check(ctx context.Context, req Request) Result {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -293,9 +243,7 @@ func (r *run) deploy(ctx context.Context) Result {
 		return res
 	}
 
-	// While the update helper works on this project (Lighthouse itself),
-	// nothing else touches it: not even the download, which would replace
-	// the files the helper is swapping to.
+	// Refuse before downloading: the download would replace the files the helper is swapping to.
 	if !r.dry && r.d.HandOffInProgress(r.req.Project.Name) {
 		f := r.step(ctx, StepHandOff, func(ctx context.Context, out io.Writer) *failure {
 			return transient(fmt.Errorf("a self-update is already in progress; it's tried again once that one is recorded (\"docker logs -f %s\" shows it)", HelperName))
@@ -385,8 +333,7 @@ func (r *run) deploy(ctx context.Context) Result {
 		return res
 	}
 
-	// From here the running version is replaced: shutting Lighthouse down
-	// mustn't cut a swap, a check or a rollback off halfway.
+	// From the swap on, shutdown mustn't cut a deploy off halfway.
 	ctx = context.WithoutCancel(ctx)
 
 	if f := r.step(ctx, StepSwap, func(ctx context.Context, out io.Writer) *failure {
@@ -515,17 +462,14 @@ func normalizeName(s string) string {
 	return strings.TrimLeft(s, "_-")
 }
 
-// inspect reads the compose file, settles the compose project's name (the
-// file's `name:`, else the repository's), claims it, moves the files to
-// <root>/<name>/<commit>, and lists the secrets to fetch.
+// inspect reads the compose file, claims its project, moves the files into place and lists the secrets.
 func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (compose.Project, string, []string, *failure) {
 	project, err := r.d.compose.Inspect(ctx, incoming)
 	if err != nil {
 		return project, "", nil, permanent(fmt.Errorf("the compose file can't be read: %w", err))
 	}
 
-	// Without `name:`, Compose names the project after its folder, which is
-	// the commit: then the repository's name is used instead.
+	// Without `name:`, Compose uses the folder (the commit); use the repository's name instead.
 	if project.Name == filepath.Base(incoming) {
 		project.Name = normalizeName(r.req.Project.Repo.Name)
 		fmt.Fprintf(out, "the compose file has no name:, so the compose project is %q (the repository's name)\n", project.Name)
@@ -557,13 +501,9 @@ func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (comp
 			if _, statErr := os.Stat(dir); statErr != nil {
 				return project, "", nil, transient(fmt.Errorf("move the files into place: %w", err))
 			}
-			// The same commit is already unpacked there (it's the one running):
-			// use it as it is.
 			os.RemoveAll(incoming)
 		}
 
-		// The config's paths are absolute: read it again where the files are
-		// now, for the checks and the build.
 		moved, err := r.d.compose.Inspect(ctx, dir)
 		if err != nil {
 			return project, dir, nil, permanent(fmt.Errorf("the compose file can't be read: %w", err))
@@ -586,10 +526,9 @@ func (r *run) inspect(ctx context.Context, incoming string, out io.Writer) (comp
 	var keys []string
 	for _, v := range vars {
 		if v.Name == DeployCommitVar || v.Name == DeployVersionVar {
-			continue // given by Lighthouse, not a secret
+			continue
 		}
 		if v.Default != "" {
-			// Only secrets belong in ${...}; a default means it's a setting.
 			fmt.Fprintf(out, "! ${%s} has a default (%q), so it isn't fetched from Cove; write plain settings out as values\n", v.Name, v.Default)
 			continue
 		}
@@ -632,9 +571,7 @@ func (r *run) check(ctx context.Context, project compose.Project, dir string, ke
 // testStage finds a Dockerfile stage named test: FROM <image> AS test.
 var testStage = regexp.MustCompile(`(?im)^\s*FROM\s+.+\s+AS\s+test\s*$`)
 
-// test builds the test stage of every Dockerfile that has one. It gets
-// nothing from the compose file (no secrets, no build arguments), and a
-// failure stops the deploy before anything else happens.
+// test builds the test stage of every Dockerfile that has one.
 func (r *run) test(ctx context.Context, project compose.Project, out io.Writer) *failure {
 	seen := map[string]bool{}
 	ran := 0
@@ -723,11 +660,7 @@ func (r *run) build(ctx context.Context, dir string, project compose.Project, en
 // KeepBackups is how many backups of each project are kept.
 const KeepBackups = 5
 
-// backup prepares for the swap. It fetches the previous version's secrets,
-// so a rollback doesn't need Cove: Cove's database may be what's being
-// swapped. And for a project with backup: postgres, it dumps the running
-// database (pg_dumpall) to <backups>/<compose project>/; if that fails, the
-// deploy stops.
+// backup prepares for the swap.
 func (r *run) backup(ctx context.Context, project compose.Project, out io.Writer) *failure {
 	if prevDir := r.currentDir(project.Name); prevDir != "" && len(r.previous) > 0 {
 		env, f := r.fetchSecretsFor(ctx, prevDir, out)
@@ -830,9 +763,8 @@ func pruneBackups(dir string, keep int, out io.Writer) {
 	}
 }
 
-// rollBack restores the version that ran before: its images under their
-// usual names, then docker compose up from its folder. res is the failure
-// that caused it.
+// rollBack restores the version that ran before: its images under their usual
+// names, then docker compose up from its folder.
 func (r *run) rollBack(ctx context.Context, res Result, project compose.Project, failedDir string) Result {
 	prevSHA := r.req.Project.DeployedSHA
 	prevDir := r.currentDir(project.Name)

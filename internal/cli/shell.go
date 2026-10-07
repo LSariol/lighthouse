@@ -1,7 +1,4 @@
-// Package cli is Lighthouse's command line: the interactive prompt
-// (`lighthouse shell`, or inside the daemon with plain `lighthouse`) and
-// one-shot commands (`lighthouse list`). All of them talk to the daemon
-// through control.Service.
+// Package cli is Lighthouse's command line: the shell and one-shot commands, through control.Service.
 package cli
 
 import (
@@ -20,13 +17,8 @@ import (
 
 // Options are the CLI's settings.
 type Options struct {
-	// Env is the environment shown in the prompt, e.g. "dev" or "prod"
-	// (APP_ENV). Production is shown in red.
 	Env string
 
-	// Embedded is true when the CLI runs inside the daemon (plain
-	// `lighthouse`). Then `exit` stops Lighthouse too, and input stays plain
-	// lines, so Ctrl+C reaches the daemon as a signal and stops it.
 	Embedded bool
 }
 
@@ -34,10 +26,6 @@ type CLI struct {
 	svc    control.Service
 	prompt string
 
-	// scanner reads stdin for both the prompt and follow-up questions, so no
-	// input is lost between two readers. When the shell has line editing,
-	// term is used instead. interactive is whether stdin is a terminal:
-	// without one, questions aren't asked and destructive commands refuse.
 	scanner     *bufio.Scanner
 	term        *term.Terminal
 	interactive bool
@@ -46,8 +34,6 @@ type CLI struct {
 	commands []command
 	byName   map[string]*command
 
-	// leave ends the shell (and, embedded, Lighthouse); `exit` calls it. It's
-	// set by Run.
 	leave func()
 }
 
@@ -71,10 +57,7 @@ func New(svc control.Service, opts Options) *CLI {
 }
 
 // Run reads and runs commands until stdin closes, `exit` is typed, or ctx is
-// cancelled. A standalone shell on a terminal has line editing, history and
-// Tab completion. Embedded in the daemon, input stays plain lines so Ctrl+C
-// still stops Lighthouse; when stdin closes (no terminal, as in Docker), Run
-// returns and the daemon keeps running.
+// cancelled.
 func (c *CLI) Run(ctx context.Context, stop func()) {
 	c.leave = stop
 
@@ -100,7 +83,7 @@ func (c *CLI) Run(ctx context.Context, stop func()) {
 }
 
 // checkDaemon warns when the daemon can't be reached, so the first command
-// doesn't come as a surprise. Help still works without it.
+// doesn't come as a surprise.
 func (c *CLI) checkDaemon(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -109,9 +92,7 @@ func (c *CLI) checkDaemon(ctx context.Context) {
 	}
 }
 
-// Exec runs a single command, e.g. ["deploy", "plop"]. It returns the
-// command's error, which the caller shows (see Report); one-shot commands
-// also turn it into a non-zero exit status.
+// Exec runs a single command, e.g. ["deploy", "plop"].
 func (c *CLI) Exec(ctx context.Context, args []string) error {
 	cmd, ok := c.byName[strings.ToLower(args[0])]
 	if !ok {
@@ -139,9 +120,7 @@ func report(err error) {
 	fail(err.Error())
 }
 
-// askLine asks question and returns the answer, trimmed. answered is false
-// when there's no terminal to ask on (e.g. a one-shot command run by a
-// script): the caller then refuses rather than guessing.
+// askLine asks question and returns the answer, trimmed.
 func (c *CLI) askLine(question string) (answer string, answered bool) {
 	switch {
 	case c.term != nil:
@@ -172,9 +151,7 @@ func (c *CLI) confirm(question string) (yes bool, answered bool) {
 	return answer == "y" || answer == "yes", answered
 }
 
-// confirmOrRefuse asks question unless skip (--yes) is set. It returns
-// whether to go ahead; when not, it has already explained why. verb names
-// the action in the messages: "remove", "stop all".
+// confirmOrRefuse asks question unless skip (--yes) is set.
 func (c *CLI) confirmOrRefuse(question string, skip bool, verb string) (bool, error) {
 	if skip {
 		return true, nil
@@ -201,9 +178,8 @@ func takeYesFlag(args []string) (bool, []string) {
 	return takeFlag(args, "--yes", "-y")
 }
 
-// takeValue removes a flag and its value ("--name x" or "--name=x") from args.
-// The value is "" when the flag isn't there; a flag without a value is an
-// error.
+// takeValue removes a flag and its value ("--name x" or "--name=x") from
+// args.
 func takeValue(args []string, flag string) (string, []string, error) {
 	value := ""
 	rest := make([]string, 0, len(args))

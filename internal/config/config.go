@@ -17,15 +17,15 @@ import (
 // Config holds every setting Lighthouse reads. In Docker they come from the
 // compose file's environment; for local development, from a .env file.
 type Config struct {
-	CoveURL       string        // COVE_URL: Cove's base URL, e.g. http://cove:2100
-	CoveTokenPath string        // COVE_TOKEN_PATH: where Lighthouse's Cove token is kept
-	StagingPath   string        // STAGING_PATH: the deploy folders, <project>/<commit>; Lighthouse owns everything in it
-	StoragePath   string        // STORAGE_PATH: the projects' data folders, <compose project>/...; read only
-	BackupPath    string        // BACKUP_PATH: database backups taken before a deploy, <compose project>/...
-	Env           string        // APP_ENV: "dev" or "prod", shown in the shell's prompt
-	Version       string        // LIGHTHOUSE_VERSION: reported by status and version
-	ControlSocket string        // LIGHTHOUSE_CONTROL_SOCKET: where serve listens for the CLI
-	PollInterval  time.Duration // LIGHTHOUSE_POLL_INTERVAL: how often GitHub is checked
+	CoveURL       string
+	CoveTokenPath string
+	StagingPath   string
+	StoragePath   string
+	BackupPath    string
+	Env           string
+	Version       string
+	ControlSocket string
+	PollInterval  time.Duration
 }
 
 const (
@@ -36,9 +36,7 @@ const (
 	minPollInterval      = 5 * time.Second
 )
 
-// Load reads the optional .env file, then the environment. Values already in
-// the environment win over the file. A .env is only for local development:
-// APP_ENV_PATH if set, else ./.env, and it's fine if neither exists.
+// Load reads the optional .env file, then the environment.
 func Load() (Config, error) {
 	path := os.Getenv("APP_ENV_PATH")
 	if path == "" {
@@ -93,8 +91,7 @@ func (c Config) ValidateCove() error {
 	return nil
 }
 
-// ValidateServe checks the settings the daemon needs. The shell and one-shot
-// commands only need ControlSocket, which always has a value.
+// ValidateServe checks the settings the daemon needs.
 func (c Config) ValidateServe() error {
 	required := []struct{ name, value string }{
 		{"COVE_URL", c.CoveURL},
@@ -120,8 +117,7 @@ func (c Config) ValidateServe() error {
 		return fmt.Errorf("COVE_URL %q must start with http:// or https://, e.g. http://cove:2100", c.CoveURL)
 	}
 
-	// Both folders are emptied on every deploy, so a typo here could delete
-	// something important. Refuse anything that is obviously not a scratch folder.
+	// Emptied on every deploy: refuse anything that isn't clearly a scratch folder.
 	if err := checkWorkFolder(c.StagingPath); err != nil {
 		return fmt.Errorf("STAGING_PATH %q: %v", c.StagingPath, err)
 	}
@@ -139,7 +135,7 @@ func checkWorkFolder(path string) error {
 	if clean == "." || clean == ".." {
 		return errors.New("is the current folder; use a dedicated folder Lighthouse may empty")
 	}
-	if filepath.Dir(clean) == clean { // "/", "C:\"
+	if filepath.Dir(clean) == clean {
 		return errors.New("is the filesystem root; use a dedicated folder Lighthouse may empty")
 	}
 	switch filepath.ToSlash(clean) {

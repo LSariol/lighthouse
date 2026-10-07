@@ -11,8 +11,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/projects"
 )
 
-// RunStoreTests runs the behaviour every projects.Store must have. open
-// returns a new, empty Store for each test.
+// RunStoreTests runs the behaviour every projects.Store must have.
 func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 	ctx := context.Background()
 	plop := github.Repo{Owner: "LSariol", Name: "Plop"}
@@ -99,7 +98,6 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 		if err := s.Remove(ctx, "plop"); !errors.Is(err, projects.ErrNotFound) {
 			t.Errorf("second Remove = %v", err)
 		}
-		// The repository is free again.
 		if _, err := s.Add(ctx, "again", site); err != nil {
 			t.Errorf("re-adding a removed project's repository: %v", err)
 		}
@@ -127,7 +125,7 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			t.Errorf("RecordCheck of a missing project = %v", err)
 		}
 
-		long := strings.Repeat("é", projects.MaxErrorLength) // 2 bytes each
+		long := strings.Repeat("é", projects.MaxErrorLength)
 		s.RecordCheck(ctx, "plop", errors.New(long))
 		p, _ = s.Get(ctx, "plop")
 		if len(p.LastError) > projects.MaxErrorLength || !strings.HasSuffix(p.LastError, "…") {
@@ -172,7 +170,6 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			t.Errorf("History limit 1 = %+v", h)
 		}
 
-		// Renaming keeps the history; removing drops it.
 		s.Rename(ctx, "plop", "plop-web")
 		if h, _ := s.History(ctx, "plop-web", 10); len(h) != 2 || h[0].Project != "plop-web" {
 			t.Errorf("History after rename = %+v", h)
@@ -243,13 +240,11 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			t.Errorf("History = %+v", h)
 		}
 
-		// Going back to an older release keeps the highest.
 		dep.SHA, dep.Version = "bbb", "v1.0.0"
 		s.RecordDeployment(ctx, dep)
 		if p, _ = s.Get(ctx, "cove"); p.DeployedVersion != "v1.0.0" || p.HighestVersion != "v1.2.0" {
 			t.Errorf("after going back: deployed %q, highest %q", p.DeployedVersion, p.HighestVersion)
 		}
-		// A failed newer one doesn't raise it.
 		failed := dep
 		failed.SHA, failed.Version, failed.Status, failed.FailureKind = "eee", "v1.3.0", projects.StatusFailed, projects.FailureTransient
 		s.RecordDeployment(ctx, failed)
@@ -257,7 +252,6 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			t.Errorf("a failed deploy raised the highest to %q", p.HighestVersion)
 		}
 
-		// A commit on the branch afterwards: no version.
 		dep.SHA, dep.Version = "ddd", ""
 		s.RecordDeployment(ctx, dep)
 		if p, _ = s.Get(ctx, "cove"); p.DeployedVersion != "" || p.HighestVersion != "v1.2.0" {
@@ -305,7 +299,6 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			}
 		}
 
-		// Transient failures don't count.
 		fail("aaa", projects.FailureTransient)
 		fail("aaa", projects.FailureTransient)
 		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 0 || p.Broken {
@@ -318,7 +311,6 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			t.Errorf("after two permanent failures: %+v", p)
 		}
 
-		// A new commit starts the count again.
 		fail("bbb", projects.FailurePermanent)
 		if p, _ := s.Get(ctx, "plop"); p.FailureCount != 1 || p.FailingSHA != "bbb" {
 			t.Errorf("after a new commit failed: %+v", p)
@@ -329,7 +321,6 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			t.Errorf("after %d failures: %+v", projects.BrokenAfter, p)
 		}
 
-		// retry clears it; so does a success.
 		if err := s.ClearFailures(ctx, "PLOP"); err != nil {
 			t.Fatal(err)
 		}
@@ -343,7 +334,6 @@ func RunStoreTests(t *testing.T, open func(t *testing.T) projects.Store) {
 			t.Errorf("after a success: %+v", p)
 		}
 
-		// A rollback is a failure too.
 		s.RecordDeployment(ctx, projects.Deployment{Project: "plop", SHA: "ddd", Trigger: projects.TriggerCheck,
 			Status: projects.StatusRolledBack, FailureKind: projects.FailurePermanent, FailedStep: "verify",
 			StartedAt: start.Add(time.Minute), FinishedAt: start.Add(time.Minute), Error: "web didn't become healthy"})

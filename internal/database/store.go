@@ -196,8 +196,6 @@ func (d *Database) RecordDeployment(ctx context.Context, dep projects.Deployment
 				    last_error = NULL, last_error_at = NULL, failure_count = 0, failing_sha = NULL, broken = false
 				WHERE id = $1`, id, dep.SHA, dep.FinishedAt, dep.Version, release.Higher(highest, dep.Version))
 		case dep.FailureKind == projects.FailurePermanent:
-			// The count restarts with a new commit; at BrokenAfter the
-			// project is broken.
 			_, err = tx.Exec(ctx, `UPDATE lighthouse.projects
 				SET last_error = nullif($2, ''), last_error_at = $3,
 				    failure_count = CASE WHEN failing_sha IS NOT DISTINCT FROM nullif($4, '') THEN failure_count + 1 ELSE 1 END,
@@ -294,8 +292,7 @@ func (d *Database) Deployment(ctx context.Context, name string, n int) (projects
 }
 
 // Import adds a project with its recorded state, as read from a pre-1.0
-// repos.json. It returns projects.ErrNameTaken or ErrRepoWatched if it's
-// already there, so importing twice changes nothing.
+// repos.json.
 func (d *Database) Import(ctx context.Context, p projects.Project) error {
 	if err := projects.ValidateName(p.Name); err != nil {
 		return err

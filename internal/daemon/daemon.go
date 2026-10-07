@@ -1,10 +1,4 @@
-// Package daemon is the running Lighthouse as the CLI sees it: it implements
-// control.Service on top of the project store, the orchestrator and Docker,
-// and turns their errors into messages that say how to fix them.
-//
-// The daemon answers from the moment it starts. The store and orchestrator
-// arrive later (Ready), once Cove and the database are reachable; until then
-// `status` shows the startup phase and everything else says it's starting.
+// Package daemon implements control.Service on the store, the orchestrator and Docker.
 package daemon
 
 import (
@@ -125,7 +119,7 @@ func (d *Daemon) Status(ctx context.Context) (control.Status, error) {
 		return s, nil
 	}
 	s.Paused = o.IsPaused()
-	s.GitHubToken = true // the orchestrator exists only once it was read
+	s.GitHubToken = true
 
 	s.Database = "reachable"
 	if err := health.Ping(ctx); err != nil {
@@ -166,7 +160,6 @@ func (d *Daemon) addServices(ctx context.Context, p *control.Project) {
 		case c.State == "running" && c.Health != "unhealthy":
 			up++
 		case c.State == "exited" && c.ExitCode == 0:
-			// A one-off job that finished: neither up nor a problem.
 		default:
 			down++
 		}
@@ -269,7 +262,6 @@ func (d *Daemon) Remove(ctx context.Context, name string, down bool) error {
 		return err
 	}
 	if down {
-		// Down needs a folder without a compose file to run in.
 		dir := d.cfg.StagingPath
 		os.MkdirAll(dir, 0o755)
 		var out strings.Builder
@@ -376,8 +368,7 @@ func (d *Daemon) Retry(ctx context.Context, name string) error {
 }
 
 // Check runs a project's latest commit through the deploy's checks without
-// deploying it. A commit that fails them isn't an error: the result says
-// which step failed and why.
+// deploying it.
 func (d *Daemon) Check(ctx context.Context, name string) (control.Deployment, error) {
 	_, o, err := d.parts()
 	if err != nil {
@@ -500,9 +491,7 @@ func toDeployment(d projects.Deployment) control.Deployment {
 	}
 }
 
-// Start, Stop and Restart a project (or one service). A whole project
-// stopped stays down, on purpose: checks don't deploy it and the reconcile
-// loop doesn't bring it back, until it's started, restarted or deployed.
+// Start, Stop and Restart a project (or one service).
 func (d *Daemon) Start(ctx context.Context, target string) error {
 	return d.stopped(ctx, target, false, d.containerAction(ctx, target, "start", d.containers.Start))
 }
@@ -536,8 +525,7 @@ func (d *Daemon) stopped(ctx context.Context, target string, stopped bool, err e
 }
 
 // targets resolves "<project>" (every container) or "<project>:<service>"
-// (that service's) to containers. Only watched projects' containers can be
-// reached, never other containers on the host.
+// (that service's) to containers.
 func (d *Daemon) targets(ctx context.Context, target string) (projects.Project, []docker.Container, error) {
 	name, service, hasService := strings.Cut(target, ":")
 	p, err := d.find(ctx, name)

@@ -17,9 +17,7 @@ import (
 // TestRealSelfUpdate runs a whole self-update against real Docker: a project
 // built FROM the Lighthouse image hands off to the real update helper, which
 // swaps it; then a version that never becomes healthy is handed off and must
-// be rolled back. The helper mounts the deploy folder at the same path, so
-// this runs inside a container: scripts/e2e-self-update.sh. Skipped
-// otherwise.
+// be rolled back.
 func TestRealSelfUpdate(t *testing.T) {
 	base := os.Getenv("LIGHTHOUSE_E2E_SELF_UPDATE")
 	if base == "" {
@@ -92,11 +90,9 @@ services:
 		if !res.HandedOff {
 			t.Fatalf("Deploy %s = %+v\n%s", version, res, log.String())
 		}
-		// A second update while the helper works is refused.
 		if again := dep.Deploy(ctx, Request{Project: p, SHA: sha, Version: version}); again.HandedOff || again.FailedStep != StepHandOff {
 			t.Errorf("a second hand-off during the first: %+v", again)
 		}
-		// The helper runs on its own; wait until it's done.
 		for {
 			out, err := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}", HelperName).Output()
 			if err != nil || strings.TrimSpace(string(out)) == "false" {
@@ -110,13 +106,11 @@ services:
 			t.Fatalf("HandOffs = %+v, %v\nhelper:\n%s", ready, err, logs)
 		}
 		dep.Forget(ready[0])
-		// The helper isn't one of the project's services.
 		if label, _ := exec.Command("docker", "inspect", "-f", `{{index .Config.Labels "com.docker.compose.project"}}`, HelperName).Output(); strings.TrimSpace(string(label)) != "" {
 			t.Errorf("the helper is labelled as compose project %q", strings.TrimSpace(string(label)))
 		}
 		return ready[0]
 	}
-	// v1: swapped in by the helper.
 	h := finish(sha1, "v1.0.0", true)
 	if h.Status != projects.StatusSucceeded || running() != "v1.0.0" {
 		logs, _ := exec.Command("docker", "logs", HelperName).CombinedOutput()
@@ -124,7 +118,6 @@ services:
 	}
 	p.DeployedSHA, p.DeployedVersion = sha1, "v1.0.0"
 
-	// v2 never becomes healthy: the helper puts v1 back.
 	h = finish(sha2, "v2.0.0", false)
 	if h.Status != projects.StatusRolledBack || h.FailedStep != StepVerify {
 		logs, _ := exec.Command("docker", "logs", HelperName).CombinedOutput()

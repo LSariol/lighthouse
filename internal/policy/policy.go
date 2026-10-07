@@ -1,16 +1,4 @@
-// Package policy decides whether a compose file may be deployed. Lighthouse
-// deploys whatever is on a watched repository's main branch with full control
-// of the host's Docker, so a compose file could otherwise ask for anything:
-// root on the host, another project's data, every secret in Cove.
-//
-// The rules are the same for every project, so adding one needs no setup on
-// the server. A project that genuinely needs more (a monitoring agent that
-// reads the Docker socket) gets an exception in policy.json, in Lighthouse's
-// own repository: reviewed in git, and deployed with Lighthouse.
-//
-// Every finding has an ID, such as "privileged" or
-// "mount:/var/run/docker.sock". An exception allows exactly the IDs it lists
-// (or, ending in "*", every ID that starts with what comes before it).
+// Package policy decides whether a compose file may be deployed (DOCUMENTATION.md §7.1).
 package policy
 
 import (
@@ -37,16 +25,14 @@ type Policy struct {
 
 // Exception allows a compose project what the rules would refuse.
 type Exception struct {
-	Project string   `json:"project"` // the compose project (the compose file's name:)
-	Allow   []string `json:"allow"`   // finding IDs, e.g. "mount:/var/run/docker.sock"
-	Reason  string   `json:"reason"`  // why; shown next to every finding it allows
+	Project string   `json:"project"`
+	Allow   []string `json:"allow"`
+	Reason  string   `json:"reason"`
 }
 
 var composeName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
-// Parse reads policy.json. Unknown fields, and exceptions without a project,
-// an ID or a reason, are errors: a typo mustn't quietly allow nothing (or
-// everything).
+// Parse reads policy.json.
 func Parse(data []byte) (Policy, error) {
 	var p Policy
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -108,11 +94,11 @@ func (p Policy) Apply(project string, findings []Finding) []Finding {
 // Finding is one thing a compose file asks for that the rules refuse (or,
 // for a warning, advise against).
 type Finding struct {
-	ID      string // what an exception names, e.g. "cap_add:NET_ADMIN"
-	Service string // "" for the project as a whole
-	Problem string // for people: what it asks for, and what to do instead
-	Warning bool   // reported, but never stops a deploy
-	Allowed string // set by Apply: the exception's reason
+	ID      string
+	Service string
+	Problem string
+	Warning bool
+	Allowed string
 }
 
 func (f Finding) String() string {

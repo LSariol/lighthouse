@@ -1,18 +1,4 @@
-// Package settings reads a project's Lighthouse settings: the x-lighthouse
-// block at the top of its compose file, which Compose itself ignores.
-//
-//	x-lighthouse:
-//	  deploy: releases   # branch (the default): every commit on the default
-//	                     # branch; releases: only version tags, v1.2.3
-//	  tier: data         # app (the default), infra or data: the order things
-//	                     # deploy and come back in (data, then infra, then apps)
-//	  backup: postgres   # pg_dumpall of the project's postgres service before
-//	                     # every deploy
-//
-// The settings live in the repository, so nothing about a project is set on
-// the server. They're read twice: from the default branch's compose file on
-// each check (to know whether to watch the branch or the tags), and from the
-// compose config of the commit being deployed (what the deploy does).
+// Package settings reads a project's x-lighthouse block (DOCUMENTATION.md §7.2).
 package settings
 
 import (
@@ -24,9 +10,9 @@ import (
 
 // Settings are a project's x-lighthouse settings.
 type Settings struct {
-	Deploy string // DeployBranch or DeployReleases
-	Tier   string // TierApp, TierInfra or TierData
-	Backup string // "" or BackupPostgres
+	Deploy string
+	Tier   string
+	Backup string
 }
 
 const (
@@ -127,10 +113,7 @@ func FromConfig(config []byte) (Settings, error) {
 	return fromMap(m)
 }
 
-// FromYAML reads the settings from a compose file's text. It understands
-// only what the x-lighthouse block needs: a top-level x-lighthouse: with
-// "key: value" lines indented under it, or {key: value, ...} on the same
-// line; values may be quoted, and # starts a comment.
+// FromYAML reads the settings from a compose file's text.
 func FromYAML(text []byte) (Settings, error) {
 	lines := strings.Split(strings.ReplaceAll(string(text), "\r\n", "\n"), "\n")
 	for i, line := range lines {
@@ -177,7 +160,7 @@ func block(lines []string) (Settings, error) {
 			continue
 		}
 		if line[0] != ' ' && line[0] != '\t' {
-			break // the next top-level key
+			break
 		}
 		lead := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 		if indent == "" {

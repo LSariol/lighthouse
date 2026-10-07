@@ -1,7 +1,4 @@
-// Package docker talks to the host's Docker daemon (the mounted
-// /var/run/docker.sock): a compose project's containers, found by the labels
-// Compose puts on them; their state and output; and the images Lighthouse
-// keeps for rollback.
+// Package docker reads containers and manages images through the Docker API.
 package docker
 
 import (
@@ -33,7 +30,7 @@ type Client struct {
 }
 
 // New connects to the Docker daemon named by the environment (DOCKER_HOST,
-// else the default socket). The API version is negotiated on first use.
+// else the default socket).
 func New() (*Client, error) {
 	api, err := client.New(client.FromEnv)
 	if err != nil {
@@ -51,12 +48,11 @@ func IsNotFound(err error) bool {
 
 // Container is one container of a compose project.
 type Container struct {
-	ID      string
-	Name    string // without the leading "/"
-	Service string // the compose service it runs
-	State   string // "running", "exited", "restarting", ...
-	Health  string // "healthy", "unhealthy", "starting", or "" without a healthcheck
-	// ExitCode is the exit code of an exited container, else 0.
+	ID       string
+	Name     string
+	Service  string
+	State    string
+	Health   string
 	ExitCode int
 	ImageID  string
 }
@@ -100,12 +96,10 @@ func (c *Client) ProjectContainers(ctx context.Context, project string) ([]Conta
 	return containers, nil
 }
 
-// SelfProject returns the compose project of the container this process
-// runs in (found by its hostname, which Docker sets to the container's ID),
-// or "" outside Docker.
+// SelfProject returns the compose project of the container this process runs in, or "".
 func (c *Client) SelfProject(ctx context.Context) (string, error) {
 	if _, err := os.Stat("/.dockerenv"); err != nil {
-		return "", nil // not in a container
+		return "", nil
 	}
 	host, err := os.Hostname()
 	if err != nil {
@@ -124,13 +118,11 @@ func (c *Client) SelfProject(ctx context.Context) (string, error) {
 // NetworkName is a name a container answers to on a network.
 type NetworkName struct {
 	Name      string
-	Container string // the container's name
-	Project   string // its compose project, or ""
+	Container string
+	Project   string
 }
 
-// NetworkNames returns every name containers on the network answer to
-// (their names, service names and aliases), including stopped containers',
-// which come back when started. A container's short ID isn't listed.
+// NetworkNames returns every name containers on the network answer to.
 func (c *Client) NetworkNames(ctx context.Context, network string) ([]NetworkName, error) {
 	result, err := c.api.ContainerList(ctx, client.ContainerListOptions{
 		All:     true,
@@ -144,7 +136,7 @@ func (c *Client) NetworkNames(ctx context.Context, network string) ([]NetworkNam
 	for _, s := range result.Items {
 		info, err := c.api.ContainerInspect(ctx, s.ID, client.ContainerInspectOptions{})
 		if IsNotFound(err) {
-			continue // removed meanwhile
+			continue
 		}
 		if err != nil {
 			return nil, fmt.Errorf("Docker: inspect container %.12s: %w", s.ID, err)
@@ -176,9 +168,7 @@ func (c *Client) NetworkNames(ctx context.Context, network string) ([]NetworkNam
 	return names, nil
 }
 
-// healthFromStatus reads the health from Docker's status text, e.g.
-// "Up 3 minutes (healthy)", for daemons whose container list doesn't
-// report it separately.
+// healthFromStatus reads the health from Docker's status text, e.g. "Up 3 minutes (healthy)".
 func healthFromStatus(status string) string {
 	switch {
 	case strings.Contains(status, "(healthy)"):
@@ -205,17 +195,15 @@ func exitCodeFromStatus(status string) int {
 
 // Detail is what a deploy checks about a container after starting it.
 type Detail struct {
-	State         string // "running", "exited", "restarting", ...
-	Health        string // "healthy", "unhealthy", "starting", or "" without a healthcheck
+	State         string
+	Health        string
 	ExitCode      int
 	RestartCount  int
-	RestartPolicy string // "no", "always", "unless-stopped", "on-failure"
+	RestartPolicy string
 	StartedAt     time.Time
 }
 
-// Inspect returns a container's state. (Docker's inspect also returns the
-// container's environment, which holds secrets; only these fields leave
-// this package.)
+// Inspect returns a container's state.
 func (c *Client) Inspect(ctx context.Context, id string) (Detail, error) {
 	result, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
@@ -319,8 +307,7 @@ func (c *Client) Tags(ctx context.Context, repository string, prefix string) ([]
 	return tags, nil
 }
 
-// Untag removes the name ref. The image itself goes only when nothing else
-// names or uses it.
+// Untag removes the name ref.
 func (c *Client) Untag(ctx context.Context, ref string) error {
 	_, err := c.api.ImageRemove(ctx, ref, client.ImageRemoveOptions{})
 	if err != nil && !IsNotFound(err) {
@@ -330,7 +317,7 @@ func (c *Client) Untag(ctx context.Context, ref string) error {
 }
 
 // PruneDangling removes images that have no name and no container: the ones
-// each rebuild leaves behind. Images kept for rollback have names.
+// each rebuild leaves behind.
 func (c *Client) PruneDangling(ctx context.Context) error {
 	_, err := c.api.ImagePrune(ctx, client.ImagePruneOptions{
 		Filters: client.Filters{}.Add("dangling", "true"),

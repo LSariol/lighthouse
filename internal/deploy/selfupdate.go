@@ -16,21 +16,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/projects"
 )
 
-// Self-update. Lighthouse can't swap its own container: `docker compose up`
-// would stop the process doing it. So a deploy of Lighthouse's own compose
-// project (Options.Self) runs as usual up to the swap, building the new
-// image while this Lighthouse keeps working, and then hands off:
-//
-//  1. It writes what the swap needs (no secrets) to
-//     <root>/.self-update/<commit>.json, and starts a helper container from
-//     the new image: `lighthouse self-update <file>`.
-//  2. The helper swaps (docker compose up), waits until the new Lighthouse
-//     is healthy (`lighthouse health`), and puts the old one back if it
-//     isn't. It writes the result into the file and exits. Its container
-//     stays, stopped, so `docker logs lighthouse-updater` shows what
-//     happened; the next update removes it.
-//  3. Whichever Lighthouse runs afterwards records the result (HandOffs,
-//     Forget).
+// Self-update: DOCUMENTATION.md §4.6.
 
 // HelperName is the update helper's container.
 const HelperName = "lighthouse-updater"
@@ -45,20 +31,19 @@ const HandOffWait = 30 * time.Minute
 // HandOff is a self-update in progress: what the helper needs, and, once
 // it's done, how it went.
 type HandOff struct {
-	Path string `json:"-"` // the file it's in
+	Path string `json:"-"`
 
-	Project        projects.Project  `json:"project"` // as before the deploy: DeployedSHA is the version to go back to
+	Project        projects.Project  `json:"project"`
 	SHA            string            `json:"sha"`
 	Version        string            `json:"version,omitempty"`
 	Trigger        string            `json:"trigger"`
 	ComposeProject string            `json:"composeProject"`
 	Dir            string            `json:"dir"`
 	Services       []compose.Service `json:"services"`
-	Previous       map[string]string `json:"previous"` // service → image ID running before
+	Previous       map[string]string `json:"previous"`
 	StartedAt      time.Time         `json:"startedAt"`
 	Steps          []projects.Step   `json:"steps"`
 
-	// Written by the helper.
 	Done        bool      `json:"done,omitempty"`
 	Status      string    `json:"status,omitempty"`
 	FailureKind string    `json:"failureKind,omitempty"`
@@ -94,8 +79,6 @@ func (r *run) handOff(ctx context.Context, project compose.Project, dir string, 
 		return permanent(errors.New("Lighthouse's compose file builds no image, so there's no new version to run the update helper from"))
 	}
 
-	// The file carries the steps so far, and this one: it's done by the
-	// time the helper reads it.
 	now := time.Now()
 	steps := append(append([]projects.Step{}, r.steps...), projects.Step{Name: StepHandOff, Status: projects.StepSucceeded,
 		StartedAt: now, FinishedAt: now, Log: "handed off to the update helper (" + HelperName + ") running " + image + "\n"})
@@ -112,7 +95,6 @@ func (r *run) handOff(ctx context.Context, project compose.Project, dir string, 
 		return transient(err)
 	}
 
-	// A helper left from the last update (stopped) is removed first.
 	if err := r.d.compose.RemoveContainer(ctx, HelperName); err != nil {
 		fmt.Fprintf(out, "! remove the last update's helper: %v\n", err)
 	}
@@ -156,9 +138,7 @@ func readHandOff(path string) (HandOff, error) {
 	return h, nil
 }
 
-// FinishHandOff is the helper's work: swap to the new Lighthouse, wait until
-// it's healthy, put the old one back if not, and write the result into the
-// hand-off file.
+// FinishHandOff is the helper's work: swap, verify, roll back if needed, record the result.
 func (d *Deployer) FinishHandOff(ctx context.Context, path string) error {
 	h, err := readHandOff(path)
 	if err != nil {
@@ -260,10 +240,7 @@ func (d *Deployer) HandOffs() ([]HandOff, error) {
 	return ready, nil
 }
 
-// HandOffInProgress reports whether the helper is still working on a
-// self-update of the project: one handed off, not yet finished, and not
-// given up on. Meanwhile nothing else deploys it: the Lighthouse that
-// starts during the swap would otherwise update itself again.
+// HandOffInProgress reports whether the helper is still working on the project.
 func (d *Deployer) HandOffInProgress(project string) bool {
 	all, _ := d.handOffs()
 	for _, h := range all {

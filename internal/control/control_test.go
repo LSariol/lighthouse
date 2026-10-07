@@ -197,7 +197,6 @@ func TestErrorsKeepTheirKind(t *testing.T) {
 		t.Errorf("Remove error = %#v", err)
 	}
 
-	// A plain error becomes an internal one, with its message.
 	if err := c.Deploy(ctx, "plop", "v1.0.0"); !errors.As(err, &e) || e.Kind != KindInternal || e.Message != "something internal broke" {
 		t.Errorf("Deploy error = %#v", err)
 	}
@@ -220,7 +219,7 @@ func TestSocketInUse(t *testing.T) {
 
 func TestStaleSocketIsReplaced(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "c.sock")
-	if err := os.WriteFile(socket, nil, 0o600); err != nil { // left behind, nobody listening
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

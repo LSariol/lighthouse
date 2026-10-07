@@ -1,6 +1,4 @@
-// Package projects defines the watched projects, their deployments, and the
-// Store that keeps them. The database package implements the Store in
-// Postgres; projectstest has an in-memory one for tests.
+// Package projects defines projects, deployments and the Store that keeps them.
 package projects
 
 import (
@@ -15,53 +13,34 @@ import (
 
 // Project is one watched repository and what Lighthouse knows about it.
 type Project struct {
-	Name      string      // Lighthouse's name for it, used in the CLI; matched without regard to case
-	Repo      github.Repo // the repository it deploys
-	CreatedAt time.Time   // when Lighthouse started watching it
+	Name      string
+	Repo      github.Repo
+	CreatedAt time.Time
 
-	// ComposeProject is the compose project, as its compose file names it
-	// (`name:`). It's learned at each deploy; "" until the first one.
 	ComposeProject string
 
-	DeployedSHA string // the commit last deployed successfully, or ""
-	// DeployedVersion is the release deployed (v1.2.3), for a project that
-	// deploys version tags; "" otherwise.
+	DeployedSHA     string
 	DeployedVersion string
-	// HighestVersion is the highest release ever deployed successfully.
-	// Checks only deploy a newer one, so going back by hand sticks.
-	HighestVersion string
-	DeployedAt     *time.Time
-	LastCheckedAt  *time.Time
-	Checks         int64
-	LastError      string // the last check's or deploy's error, or "" if it worked
-	LastErrorAt    *time.Time
+	HighestVersion  string
+	DeployedAt      *time.Time
+	LastCheckedAt   *time.Time
+	Checks          int64
+	LastError       string
+	LastErrorAt     *time.Time
 
-	// FailureCount is how many deploys of FailingSHA in a row failed for a
-	// reason retrying can't fix. At BrokenAfter, Broken is set: the commit
-	// isn't tried again until a new one appears or `retry` clears it.
 	FailureCount int
 	FailingSHA   string
 	Broken       bool
 
-	// Mode and Tier are the settings from the compose file's x-lighthouse
-	// block (internal/settings), as last read: "branch" or "releases", and
-	// "data", "infra" or "app".
 	Mode string
 	Tier string
 
-	// HeldSHA is the branch's newest commit when someone went back to an
-	// older one by hand: checks don't deploy it again (a newer commit, or
-	// `deploy <name>`, does). "" when nothing is held.
 	HeldSHA string
 
-	// Stopped is set by `stop` and cleared by `start` or a deploy: the
-	// reconcile loop leaves a stopped project down, and checks don't deploy it.
 	Stopped bool
 }
 
-// ComposeName is the compose project Lighthouse manages for p: the one its
-// compose file named at the last deploy, or, before the first, the
-// repository's name lowercased (what Compose would call it).
+// ComposeName is p's compose project: as last deployed, else the repository's name.
 func (p Project) ComposeName() string {
 	if p.ComposeProject != "" {
 		return p.ComposeProject
@@ -75,26 +54,26 @@ const BrokenAfter = 3
 
 // Deployment is one attempt to deploy a project, recorded when it ends.
 type Deployment struct {
-	Project     string // the project's name
-	SHA         string // the commit deployed
-	Version     string // the release deployed (v1.2.3), or "" for a commit on the branch
-	Trigger     string // TriggerCheck, TriggerManual or TriggerReconcile
-	Status      string // StatusSucceeded, StatusFailed or StatusRolledBack
-	FailureKind string // for a failure: FailureTransient or FailurePermanent
-	FailedStep  string // for a failure: the step that failed
+	Project     string
+	SHA         string
+	Version     string
+	Trigger     string
+	Status      string
+	FailureKind string
+	FailedStep  string
 	StartedAt   time.Time
 	FinishedAt  time.Time
 	Error       string
-	Steps       []Step // filled in by Store.Deployment, not by History
+	Steps       []Step
 }
 
 // Step is one step of a deployment.
 type Step struct {
-	Name       string // e.g. "fetch", "build", "swap"
-	Status     string // StepSucceeded, StepFailed or StepSkipped
+	Name       string
+	Status     string
 	StartedAt  time.Time
 	FinishedAt time.Time
-	Log        string // the tail of its output, secret values removed
+	Log        string
 }
 
 const (

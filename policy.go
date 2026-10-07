@@ -1,12 +1,9 @@
-// Package lighthouse holds what the binary embeds from the repository's top
-// folder.
+// Package lighthouse holds what the binary embeds from the repository's top folder.
 package lighthouse
 
 import _ "embed"
 
-// PolicyFile is policy.json: the exceptions to the deploy rules (see
-// internal/policy). It's built into the binary, so a change is reviewed in
-// git and takes effect when Lighthouse is deployed.
+// PolicyFile is policy.json, built into the binary.
 //
 //go:embed policy.json
 var PolicyFile []byte

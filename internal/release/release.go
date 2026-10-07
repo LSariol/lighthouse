@@ -1,7 +1,4 @@
-// Package release picks the versions a release-only project deploys: tags
-// that are plain semantic versions, v1.2.3 or 1.2.3, compared as numbers (so
-// v1.10.0 is newer than v1.9.0). Pre-releases (v1.1.0-rc.1) and other tags
-// (latest, deploy-test) aren't releases.
+// Package release picks releases: plain version tags (v1.2.3), compared as numbers.
 package release
 
 import (
@@ -43,8 +40,7 @@ func (v Version) Newer(w Version) bool {
 	return v.Patch > w.Patch
 }
 
-// Newest returns the newest release among tags. ok is false if none is one.
-// Of two tags for the same version (v1.2.0 and 1.2.0), the first wins.
+// Newest returns the newest release among tags.
 func Newest(tags []github.Tag) (github.Tag, Version, bool) {
 	var best github.Tag
 	var bestV Version

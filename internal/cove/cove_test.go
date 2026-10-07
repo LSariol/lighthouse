@@ -17,9 +17,9 @@ import (
 
 // fakeCove imitates the parts of Cove's API that Connect and GitHubToken use.
 type fakeCove struct {
-	closedFor atomic.Int32      // how many more bootstrap requests are refused
-	token     string            // the token the bootstrap hands out and auth accepts
-	secrets   map[string]string // what the batch endpoint can return
+	closedFor atomic.Int32
+	token     string
+	secrets   map[string]string
 }
 
 func (f *fakeCove) handler() http.Handler {
@@ -86,7 +86,7 @@ func start(t *testing.T, f *fakeCove) *coveclient.Client {
 func TestFirstStartWaitsForBootstrap(t *testing.T) {
 	f := &fakeCove{token: "cove_abc", secrets: map[string]string{
 		GitHubTokenKey: "gh", DatabaseURLKey: "postgres://app", MigratorDatabaseURLKey: "postgres://migrator"}}
-	f.closedFor.Store(2) // refused twice, then opened
+	f.closedFor.Store(2)
 	c := start(t, f)
 	path := filepath.Join(t.TempDir(), "cove", "token")
 
@@ -107,7 +107,7 @@ func TestFirstStartWaitsForBootstrap(t *testing.T) {
 func TestRejectedTokenExplainsTheFix(t *testing.T) {
 	c := start(t, &fakeCove{token: "cove_new"})
 	path := filepath.Join(t.TempDir(), "token")
-	os.WriteFile(path, []byte("cove_old\n"), 0o600) // rotated since
+	os.WriteFile(path, []byte("cove_old\n"), 0o600)
 
 	err := Connect(context.Background(), c, path, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "bootstrap open lighthouse") || !strings.Contains(err.Error(), path) {

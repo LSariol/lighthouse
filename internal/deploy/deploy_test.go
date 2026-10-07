@@ -85,26 +85,25 @@ func (f *fakeSecrets) GetSecretsContext(ctx context.Context, keys ...string) (ma
 // fakeCompose answers from its fields; up runs after a successful Up, to
 // let the test set the containers' state.
 type fakeCompose struct {
-	name     string // "" behaves like a compose file without `name:`
+	name     string
 	services []compose.Service
 	vars     []compose.Variable
 	buildErr error
 	upErr    error
 	buildOut string
-	// config is the compose config the checks read; a plain one if "".
 	config   string
 	stageErr error
 
-	stages  []string // Dockerfiles whose test stage was built
-	helpers []string // containers started with RunDetached
+	stages  []string
+	helpers []string
 	runErr  error
-	execs   []string // containers commands ran in
-	dump    string   // what Exec writes (a database dump)
+	execs   []string
+	dump    string
 	execErr error
 
 	mu     sync.Mutex
-	builds []string // dirs
-	ups    []string // dirs
+	builds []string
+	ups    []string
 	upEnv  [][]string
 	up     func(dir string)
 }
@@ -114,7 +113,6 @@ func (f *fakeCompose) Inspect(ctx context.Context, dir string) (compose.Project,
 	if name == "" {
 		name = filepath.Base(dir)
 	}
-	// Built services are built from the folder, as Compose reports them.
 	services := append([]compose.Service(nil), f.services...)
 	for i := range services {
 		if services[i].Build {
@@ -186,9 +184,9 @@ type fakeDocker struct {
 	mu         sync.Mutex
 	containers map[string][]docker.Container
 	details    map[string]docker.Detail
-	tags       map[string]string // ref → image ID
+	tags       map[string]string
 	pruned     int
-	names      []docker.NetworkName // on spark
+	names      []docker.NetworkName
 }
 
 func newFakeDocker() *fakeDocker {
@@ -327,7 +325,6 @@ func TestFirstDeploy(t *testing.T) {
 		t.Errorf("steps: %s", got)
 	}
 
-	// Unpacked into <root>/<compose project>/<commit>, without the top folder.
 	dir := filepath.Join(e.root, "website", sha1[:12])
 	if _, err := os.Stat(filepath.Join(dir, "compose.yaml")); err != nil {
 		t.Errorf("files aren't in %s: %v", dir, err)
@@ -338,7 +335,6 @@ func TestFirstDeploy(t *testing.T) {
 		}
 	}
 
-	// Only the variable without a default is a secret.
 	if !slices.Equal(e.secrets.asked, []string{"WEBSITE_DATABASE_URL"}) {
 		t.Errorf("asked Cove for %v", e.secrets.asked)
 	}
@@ -346,7 +342,6 @@ func TestFirstDeploy(t *testing.T) {
 		t.Errorf("Up's environment: %v", e.compose.upEnv)
 	}
 
-	// The secret is hidden in the stored output and in the log.
 	build := res.Steps[5]
 	if strings.Contains(build.Log, "hunter22") || !strings.Contains(build.Log, hidden) {
 		t.Errorf("build log: %q", build.Log)
@@ -358,7 +353,6 @@ func TestFirstDeploy(t *testing.T) {
 		t.Errorf("inspect doesn't warn about the default: %q", res.Steps[1].Log)
 	}
 
-	// The built image is kept for rollback under its commit.
 	if e.docker.tags["website-web:lh-"+sha1[:12]] == "" {
 		t.Errorf("tags: %v", e.docker.tags)
 	}
@@ -370,7 +364,7 @@ func TestFirstDeploy(t *testing.T) {
 func TestNoComposeName(t *testing.T) {
 	e := newEnv(t)
 	e.compose.name = ""
-	e.compose.vars = []compose.Variable{{Name: "LANDING_DATABASE_URL"}} // its own keys, by the repository's name
+	e.compose.vars = []compose.Variable{{Name: "LANDING_DATABASE_URL"}}
 	e.compose.up = func(dir string) {
 		e.docker.set("landing", "web", "w", "i", healthy)
 		e.docker.set("landing", "db", "d", "p", running)
@@ -435,7 +429,6 @@ func TestFailuresBeforeTheSwap(t *testing.T) {
 			if res.Steps[len(res.Steps)-1].Status != projects.StepSkipped {
 				t.Errorf("later steps aren't marked skipped: %s", stepStatuses(res))
 			}
-			// The failed deploy's files are gone.
 			entries, _ := os.ReadDir(filepath.Join(e.root, "website"))
 			incoming, _ := os.ReadDir(filepath.Join(e.root, ".incoming"))
 			if len(entries)+len(incoming) != 0 {
@@ -462,7 +455,6 @@ func TestRollbackWhenUnhealthy(t *testing.T) {
 	p := deployed(t, e)
 	oldImage := "img-" + sha1[:12]
 
-	// The new version's web turns unhealthy; the old one comes back.
 	e.compose.up = func(dir string) {
 		if filepath.Base(dir) == sha2[:12] {
 			e.docker.set("website", "web", "web-new", "img-new", docker.Detail{State: "running", Health: "unhealthy", RestartPolicy: "unless-stopped"})

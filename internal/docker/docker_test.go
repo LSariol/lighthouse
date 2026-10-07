@@ -14,8 +14,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/compose"
 )
 
-// These tests need a Docker daemon; without one they're skipped. They create
-// a small compose project and remove it afterwards.
+// These tests need a Docker daemon; without one they're skipped.
 func TestProjectContainers(t *testing.T) {
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skip("no Docker daemon")
@@ -53,7 +52,6 @@ services:
 	}
 	defer d.Close()
 
-	// The healthcheck needs a moment.
 	var cs []Container
 	for i := 0; i < 30; i++ {
 		cs, err = d.ProjectContainers(ctx, project)
@@ -82,7 +80,6 @@ services:
 		t.Errorf("an unknown project has containers: %+v", other)
 	}
 
-	// Tags for rollback.
 	const repo = "lighthouse-docker-test-img"
 	if err := d.Tag(ctx, cs[1].ImageID, repo+":lh-aaa"); err != nil {
 		t.Fatal(err)

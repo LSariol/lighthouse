@@ -16,7 +16,6 @@ func TestFromYAML(t *testing.T) {
 		{"x-lighthouse: {deploy: releases, tier: infra}\nservices: {}\n", Settings{Deploy: DeployReleases, Tier: TierInfra}},
 		{"x-lighthouse:\r\n    # a comment\r\n\r\n    deploy: \"releases\"\r\nname: cove\r\n", Settings{Deploy: DeployReleases, Tier: TierApp}},
 		{"x-lighthouse: {}\n", Default},
-		// Not at the top level: someone else's key.
 		{"services:\n  web:\n    x-lighthouse:\n      deploy: releases\n", Default},
 	}
 	for i, c := range cases {

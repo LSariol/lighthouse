@@ -19,8 +19,7 @@ type Client struct {
 	hc     *http.Client
 }
 
-// NewClient returns a Client for the daemon listening at socket. It doesn't
-// connect until the first call.
+// NewClient returns a Client for the daemon listening at socket.
 func NewClient(socket string) *Client {
 	return &Client{
 		socket: socket,
@@ -31,7 +30,6 @@ func NewClient(socket string) *Client {
 					return d.DialContext(ctx, "unix", socket)
 				},
 			},
-			// No timeout: deploys take minutes. Callers use ctx instead.
 		},
 	}
 }
@@ -61,7 +59,6 @@ func (c *Client) call(ctx context.Context, method string, path string, body any,
 		reader = bytes.NewReader(data)
 	}
 
-	// The host is ignored: the transport always dials the socket.
 	req, err := http.NewRequestWithContext(ctx, method, "http://lighthouse"+path, reader)
 	if err != nil {
 		return err

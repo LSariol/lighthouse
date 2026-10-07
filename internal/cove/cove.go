@@ -1,7 +1,4 @@
-// Package cove connects Lighthouse to Cove, the server's secret vault, at
-// startup: it gets Lighthouse's own token (through Cove's bootstrap endpoint
-// the first time), waits until Cove is ready, and reads Lighthouse's own
-// secrets. Deploys fetch projects' secrets with the same client.
+// Package cove connects Lighthouse to Cove at startup and reads its own secrets.
 package cove
 
 import (
@@ -29,11 +26,7 @@ type Secrets struct {
 	MigratorDatabaseURL string
 }
 
-// Connect makes c ready to use. It loads Lighthouse's token from tokenPath,
-// or fetches it through Cove's bootstrap endpoint and saves it there. While
-// the endpoint is closed or Cove is unreachable, it logs why and tries again
-// every retry until ctx is cancelled. Then it waits until Cove is ready and
-// checks the token.
+// Connect makes c ready to use.
 func Connect(ctx context.Context, c *coveclient.Client, tokenPath string, retry time.Duration) error {
 	for {
 		_, err := c.LoadOrBootstrap(tokenPath)
@@ -72,8 +65,7 @@ func Connect(ctx context.Context, c *coveclient.Client, tokenPath string, retry 
 	return nil
 }
 
-// ReadSecrets reads Lighthouse's own secrets from Cove in one request. If any
-// is missing, the error names every missing key.
+// ReadSecrets reads Lighthouse's own secrets from Cove in one request.
 func ReadSecrets(ctx context.Context, c *coveclient.Client) (Secrets, error) {
 	values, err := c.GetSecretsContext(ctx, GitHubTokenKey, DatabaseURLKey, MigratorDatabaseURLKey)
 	switch {

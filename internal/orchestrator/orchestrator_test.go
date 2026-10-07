@@ -21,8 +21,8 @@ import (
 type fakeRepo struct {
 	head    string
 	tags    []github.Tag
-	compose string // the compose file's text; a plain one if ""
-	down    bool   // GitHub answers 502 for it
+	compose string
+	down    bool
 }
 
 // fakeGitHub serves repositories by name, honouring ETags, and counts
@@ -30,7 +30,7 @@ type fakeRepo struct {
 type fakeGitHub struct {
 	mu    sync.Mutex
 	repos map[string]*fakeRepo
-	calls map[string]int // "commits", "commits 304", "tags", "tags 304", "compose"
+	calls map[string]int
 }
 
 func newGitHub(heads map[string]string) *fakeGitHub {
@@ -97,7 +97,6 @@ func (g *fakeGitHub) ResolveCommit(ctx context.Context, r github.Repo, ref strin
 	if _, err := g.repo(r, token); err != nil {
 		return "", err
 	}
-	// The commits the tests know, by their short SHAs.
 	for _, sha := range []string{"aaa1111bbb", "old0000ccc"} {
 		if strings.HasPrefix(sha, ref) {
 			return sha, nil
@@ -129,12 +128,12 @@ func releases(tier string) string {
 // fakeDeployer records deploys; result decides how each goes (success if nil).
 type fakeDeployer struct {
 	mu       sync.Mutex
-	deployed []string // "name@sha", or "name@version" for a release
+	deployed []string
 	checked  []string
 	result   func(req deploy.Request) deploy.Result
 	handOffs []deploy.HandOff
 	forgot   int
-	updating map[string]bool // projects whose self-update the helper is still working on
+	updating map[string]bool
 }
 
 func (f *fakeDeployer) HandOffInProgress(project string) bool {
@@ -241,7 +240,6 @@ func get(t *testing.T, s projects.Store, name string) projects.Project {
 }
 
 func TestScanDeploysNewCommitsAndSkipsFailures(t *testing.T) {
-	// "b" doesn't exist on GitHub: the projects after it are still checked.
 	gh := newGitHub(map[string]string{"a": "aaa", "c": "ccc"})
 	o, store, d, _ := setup(t, gh, "a", "b", "c")
 	ctx := context.Background()
@@ -264,8 +262,6 @@ func TestScanDeploysNewCommitsAndSkipsFailures(t *testing.T) {
 		t.Errorf("a's deployment = %+v", h)
 	}
 
-	// Nothing changed on GitHub: nothing deploys again, and the checks were
-	// answered "not modified", without reading the compose files again.
 	o.Scan(ctx)
 	if d.count() != 2 {
 		t.Errorf("second scan deployed %v", d.deployed)
@@ -292,7 +288,6 @@ func TestBrokenAfterRepeatedFailures(t *testing.T) {
 		t.Fatalf("after %d failures: %+v", projects.BrokenAfter, a)
 	}
 
-	// Broken: the same commit isn't tried again, and the scan isn't an error.
 	if err := o.Scan(ctx); err != nil {
 		t.Errorf("scan of a broken project = %v", err)
 	}
@@ -303,7 +298,6 @@ func TestBrokenAfterRepeatedFailures(t *testing.T) {
 		t.Errorf("the error that broke it was lost: %q", a.LastError)
 	}
 
-	// A new commit is tried.
 	gh.repos["a"].head = "bbb"
 	d.result = nil
 	if err := o.Scan(ctx); err != nil {
@@ -320,7 +314,6 @@ func TestTransientFailuresWait(t *testing.T) {
 	d.result = failing(projects.FailureTransient)
 	ctx := context.Background()
 
-	// A minute, then two, then four...
 	o.Scan(ctx)
 	for _, wait := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute} {
 		before := d.count()
@@ -339,7 +332,6 @@ func TestTransientFailuresWait(t *testing.T) {
 		t.Errorf("transient failures broke it: %+v", a)
 	}
 
-	// Never longer than 30 minutes.
 	for i := 0; i < 10; i++ {
 		clk.advance(maxBackoff)
 		o.Scan(ctx)
@@ -348,7 +340,6 @@ func TestTransientFailuresWait(t *testing.T) {
 		t.Errorf("backoff = %s", w.backoff)
 	}
 
-	// `deploy` doesn't wait, and a success clears the wait.
 	d.result = nil
 	if err := o.Deploy(ctx, "a", ""); err != nil {
 		t.Fatal(err)
@@ -357,7 +348,6 @@ func TestTransientFailuresWait(t *testing.T) {
 		t.Error("a success didn't clear the wait")
 	}
 
-	// GitHub trouble waits too.
 	gh.repos["a"].down = true
 	o.Scan(ctx)
 	if w := o.watchOf("a"); w.backoff != minBackoff {
@@ -391,14 +381,12 @@ func TestReleaseMode(t *testing.T) {
 	o, store, d, _ := setup(t, gh, "cove")
 	ctx := context.Background()
 
-	// The newest release, not the branch.
 	o.Scan(ctx)
 	p := get(t, store, "cove")
 	if d.list() != "cove@v1.1.0" || p.DeployedSHA != "s110" || p.DeployedVersion != "v1.1.0" || p.Mode != "releases" || p.Tier != "infra" {
 		t.Fatalf("deployed %s; project %+v", d.list(), p)
 	}
 
-	// A new commit on the branch, or an older or pre-release tag: nothing.
 	gh.repos["cove"].head = "head2"
 	gh.repos["cove"].tags = append(gh.repos["cove"].tags, github.Tag{Name: "v1.0.5", SHA: "s105"}, github.Tag{Name: "v2.0.0-rc.1", SHA: "rc"})
 	o.Scan(ctx)
@@ -406,21 +394,18 @@ func TestReleaseMode(t *testing.T) {
 		t.Errorf("deployed %s", d.list())
 	}
 
-	// A newer release.
 	gh.repos["cove"].tags = append(gh.repos["cove"].tags, github.Tag{Name: "v1.2.0", SHA: "s120"})
 	o.Scan(ctx)
 	if d.list() != "cove@v1.1.0,cove@v1.2.0" {
 		t.Errorf("deployed %s", d.list())
 	}
 
-	// Its tag moved: not deployed again.
 	gh.repos["cove"].tags[len(gh.repos["cove"].tags)-1].SHA = "moved"
 	o.Scan(ctx)
 	if d.count() != 2 {
 		t.Errorf("a moved tag was deployed: %s", d.list())
 	}
 
-	// Going back by hand sticks: the next check doesn't upgrade again.
 	if err := o.Deploy(ctx, "cove", "v1.0.0"); err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +414,6 @@ func TestReleaseMode(t *testing.T) {
 		t.Errorf("after going back: deployed %s, running %s", d.list(), p.DeployedVersion)
 	}
 
-	// `deploy` without a version is the newest release; an unknown tag is an error.
 	if err := o.Deploy(ctx, "cove", ""); err != nil || !strings.HasSuffix(d.list(), "cove@v1.2.0") {
 		t.Errorf("deploy: %v, deployed %s", err, d.list())
 	}
@@ -462,8 +446,6 @@ func TestSettingsFollowTheBranch(t *testing.T) {
 	ctx := context.Background()
 	o.Scan(ctx)
 
-	// The compose file on the branch switches to releases: no tag yet, so
-	// nothing more is deployed.
 	gh.repos["site"].head = "bbb"
 	gh.repos["site"].compose = releases("app")
 	o.Scan(ctx)
@@ -471,7 +453,6 @@ func TestSettingsFollowTheBranch(t *testing.T) {
 		t.Errorf("mode %q, deployed %s", p.Mode, d.list())
 	}
 
-	// A broken x-lighthouse block is the check's error.
 	gh.repos["site"].head = "ccc"
 	gh.repos["site"].compose = "x-lighthouse:\n  deploy: sometimes\n"
 	if err := o.Scan(ctx); err == nil {
@@ -483,13 +464,12 @@ func TestSettingsFollowTheBranch(t *testing.T) {
 }
 
 func TestOrder(t *testing.T) {
-	// Checks go data first, then infra, then apps.
 	gh := newGitHub(map[string]string{"app": "a1", "cove": "c1", "sparkdb": "s1"})
 	gh.repos["cove"].compose = "x-lighthouse: {tier: infra}\n"
 	gh.repos["sparkdb"].compose = "x-lighthouse: {tier: data}\n"
 	o, store, d, _ := setup(t, gh, "app", "cove", "sparkdb")
 	ctx := context.Background()
-	o.Scan(ctx) // learns the tiers, deploying in name order the first time
+	o.Scan(ctx)
 	for _, name := range []string{"app", "cove", "sparkdb"} {
 		gh.repos[name].head += "-2"
 	}
@@ -504,8 +484,6 @@ func TestOrder(t *testing.T) {
 }
 
 func TestTurn(t *testing.T) {
-	// One at a time; while one runs, the waiting data deploy goes before
-	// the app that asked earlier.
 	var tr turn
 	ctx := context.Background()
 	if err := tr.acquire(ctx, 2); err != nil {
@@ -530,7 +508,6 @@ func TestTurn(t *testing.T) {
 	start("data", 0)
 	waitFor(t, &tr, 2)
 
-	// A waiter that gives up leaves the line.
 	cctx, cancel := context.WithCancel(ctx)
 	errc := make(chan error)
 	go func() { errc <- tr.acquire(cctx, 1) }()
@@ -572,7 +549,6 @@ func TestRollbackOnTheBranch(t *testing.T) {
 	gh.repos["site"].head = "aaa1111bbb"
 	o.Scan(ctx)
 
-	// Back to what ran before; the newest commit is held.
 	back, err := o.Rollback(ctx, "site")
 	if err != nil || back != "old0000" || get(t, store, "site").DeployedSHA != "old0000ccc" {
 		t.Fatalf("Rollback = %q, %v; deployed %s", back, err, get(t, store, "site").DeployedSHA)
@@ -585,14 +561,12 @@ func TestRollbackOnTheBranch(t *testing.T) {
 		t.Errorf("the held commit was redeployed: %s", d.list())
 	}
 
-	// A newer commit deploys as usual.
 	gh.repos["site"].head = "new"
 	o.Scan(ctx)
 	if !strings.HasSuffix(d.list(), "site@new") {
 		t.Errorf("deployed %s", d.list())
 	}
 
-	// deploy <name> <short commit>, and deploy <name> ends the hold.
 	if err := o.Deploy(ctx, "site", "aaa1111"); err != nil || !strings.HasSuffix(d.list(), "site@aaa1111bbb") {
 		t.Errorf("deploy of a short SHA: %v, %s", err, d.list())
 	}
@@ -609,7 +583,6 @@ func TestRollbackOnTheBranch(t *testing.T) {
 		t.Errorf("an unknown tag = %v", err)
 	}
 
-	// Nothing earlier to go back to.
 	o2, _, _, _ := setup(t, newGitHub(map[string]string{"x": "aaa"}), "x")
 	o2.Scan(ctx)
 	if _, err := o2.Rollback(ctx, "x"); !errors.Is(err, ErrNothingToRollBackTo) {
@@ -627,8 +600,6 @@ func TestSelfUpdate(t *testing.T) {
 		return deploy.Result{Status: projects.StatusSucceeded}
 	}
 
-	// The hand-off: nothing recorded, checks stop, and the turn is kept so
-	// nothing else deploys before this Lighthouse is replaced.
 	if err := o.Deploy(ctx, "lighthouse", ""); !errors.Is(err, ErrHandedOff) {
 		t.Fatalf("Deploy = %v, want ErrHandedOff", err)
 	}
@@ -641,8 +612,6 @@ func TestSelfUpdate(t *testing.T) {
 		t.Errorf("a deploy after the hand-off = %v, want it to wait", err)
 	}
 
-	// While the helper works, checks don't deploy Lighthouse again, and
-	// that isn't an error; a deploy by hand says why it waits.
 	o3, store3, d3, _ := setup(t, newGitHub(map[string]string{"lighthouse": "newer"}), "lighthouse")
 	d3.updating = map[string]bool{"lighthouse": true}
 	if err := o3.Scan(ctx); err != nil || d3.count() != 0 {
@@ -655,7 +624,6 @@ func TestSelfUpdate(t *testing.T) {
 		t.Errorf("Deploy during a self-update = %v, want ErrUpdating", err)
 	}
 
-	// The next Lighthouse records how it went.
 	o2, _, d2, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new"}))
 	o2.store = store
 	now := time.Now()
@@ -672,9 +640,6 @@ func TestSelfUpdate(t *testing.T) {
 }
 
 func TestHandOffWithoutReplacement(t *testing.T) {
-	// The helper finishes, but nothing replaced this Lighthouse (the new
-	// version was the same image): it records the result, gives up the
-	// turn and checks again.
 	o, store, d, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new", "app": "a1"}), "app", "lighthouse")
 	o.handOffPoll = 5 * time.Millisecond
 	ctx := context.Background()
@@ -702,12 +667,10 @@ func TestHandOffWithoutReplacement(t *testing.T) {
 	if o.IsPaused() || get(t, store, "lighthouse").DeployedSHA != "new" {
 		t.Fatalf("paused %v, deployed %q", o.IsPaused(), get(t, store, "lighthouse").DeployedSHA)
 	}
-	// The turn is free again.
 	if err := o.Deploy(ctx, "app", ""); err != nil {
 		t.Errorf("a deploy after the hand-off was recorded = %v", err)
 	}
 
-	// A pause from the operator outlives a hand-off.
 	o2, _, d2, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new"}), "lighthouse")
 	o2.handOffPoll = 5 * time.Millisecond
 	d2.result = func(deploy.Request) deploy.Result { return deploy.Result{HandedOff: true} }
@@ -728,7 +691,6 @@ func TestStoppedProjectsAreLeftAlone(t *testing.T) {
 	if d.count() != 0 {
 		t.Errorf("a stopped project was deployed: %s", d.list())
 	}
-	// `deploy` starts it again.
 	if err := o.Deploy(ctx, "a", ""); err != nil || get(t, store, "a").Stopped {
 		t.Errorf("deploy of a stopped project: %v, stopped %v", err, get(t, store, "a").Stopped)
 	}
@@ -758,18 +720,15 @@ func TestReconcile(t *testing.T) {
 
 	cs := &fakeContainers{policy: "unless-stopped", byProject: map[string][]docker.Container{
 		"app":     {{ID: "a", Service: "web", State: "running"}},
-		"sparkdb": nil, // gone
-		"idle":    nil, // stopped on purpose
+		"sparkdb": nil,
+		"idle":    nil,
 		"job":     {{ID: "j", Service: "migrate", State: "exited"}},
 	}}
-	// The job is a one-off: no restart policy.
 	o.containers = &policyByID{cs, map[string]string{"j": "no"}}
 
-	// Seen down once: not yet.
 	if err := o.Reconcile(ctx); err != nil || d.count() != 0 {
 		t.Fatalf("first pass: %v, deployed %s", err, d.list())
 	}
-	// Still down: brought back, at what was deployed.
 	clk.advance(ReconcileEvery)
 	if err := o.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -781,7 +740,6 @@ func TestReconcile(t *testing.T) {
 		t.Errorf("trigger %q", h[0].Trigger)
 	}
 
-	// Back up: nothing more. A long-running service that stopped counts.
 	cs.byProject["sparkdb"] = []docker.Container{{ID: "s", Service: "db", State: "running"}}
 	cs.byProject["app"] = []docker.Container{{ID: "a", Service: "web", State: "exited"}}
 	o.Reconcile(ctx)
@@ -791,7 +749,6 @@ func TestReconcile(t *testing.T) {
 		t.Errorf("deployed %s", d.list())
 	}
 
-	// A project that was down only once (Docker restarting it) isn't touched.
 	cs.byProject["app"] = []docker.Container{{ID: "a", Service: "web", State: "exited"}}
 	o.Reconcile(ctx)
 	cs.byProject["app"] = []docker.Container{{ID: "a", Service: "web", State: "running"}}
@@ -816,8 +773,6 @@ func (p *policyByID) Inspect(ctx context.Context, id string) (docker.Detail, err
 }
 
 func TestComposeProjectConflict(t *testing.T) {
-	// Two projects whose repositories are both called "site" claim the same
-	// compose project.
 	store := &projectstest.Store{}
 	ctx := context.Background()
 	store.Add(ctx, "first", github.Repo{Owner: "x", Name: "site"})
@@ -842,7 +797,6 @@ func TestCheck(t *testing.T) {
 	d := &fakeDeployer{}
 	o := New(store, newGitHub(map[string]string{"site": "aaa"}), d, nil, "t")
 
-	// Nothing is deployed, recorded or claimed.
 	res, sha, err := o.Check(ctx, "first")
 	if err != nil || sha != "aaa" || res.Status != projects.StatusSucceeded {
 		t.Fatalf("Check = %+v, %q, %v", res, sha, err)
@@ -854,7 +808,6 @@ func TestCheck(t *testing.T) {
 		t.Errorf("Check was recorded: %+v", h)
 	}
 
-	// It does say when the compose project is another project's.
 	if err := o.Deploy(ctx, "first", ""); err != nil {
 		t.Fatal(err)
 	}

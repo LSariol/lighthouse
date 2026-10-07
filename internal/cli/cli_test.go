@@ -18,7 +18,7 @@ type fakeService struct {
 	projects []control.Project
 	status   control.Status
 	calls    []string
-	failFor  map[string]bool // project names whose actions fail
+	failFor  map[string]bool
 }
 
 func newFake(names ...string) *fakeService {
@@ -246,7 +246,6 @@ func TestListShowsReleasesAndStopped(t *testing.T) {
 		}
 	}
 
-	// A project stopped on purpose isn't a problem for status.
 	svc.status.Projects = svc.projects
 	svc.status.Projects[1].State = "stopped"
 	out, _, err = run(t, svc, "status")
@@ -277,7 +276,6 @@ func TestConfirmation(t *testing.T) {
 		}
 	}
 
-	// Commands that aren't destructive don't ask.
 	svc := newFake("plop")
 	if _, _, err := run(t, svc, "restart plop"); err != nil || len(svc.calls) != 1 {
 		t.Errorf("restart plop: %v, calls %v", err, svc.calls)
@@ -297,7 +295,6 @@ func TestConfirmationWording(t *testing.T) {
 }
 
 func TestAddNames(t *testing.T) {
-	// Named after the repository by default; --name only when asked.
 	svc := newFake()
 	if _, _, err := run(t, svc, "add https://github.com/o/plop"); err != nil || svc.calls[0] != "add plop" {
 		t.Errorf("add <url>: %v, calls %v", err, svc.calls)
@@ -311,7 +308,6 @@ func TestAddNames(t *testing.T) {
 		t.Errorf("add --name without a value = %v, want a usage error", err)
 	}
 
-	// A taken name, without a terminal: the error, nothing added.
 	svc = newFake("plop")
 	_, _, err := run(t, svc, "add https://github.com/x/plop")
 	var ce *control.Error
@@ -319,7 +315,6 @@ func TestAddNames(t *testing.T) {
 		t.Errorf("add with a taken name = %v, calls %v", err, svc.calls)
 	}
 
-	// On a terminal: asked for another name, and asked again while it's taken.
 	svc = newFake("plop", "plop2")
 	errOut, err := runAnswering(t, svc, "add https://github.com/x/plop", "plop2\nplop3\n")
 	if err != nil || strings.Join(svc.calls, ",") != "add plop (taken),add plop2 (taken),add plop3" {
@@ -329,7 +324,6 @@ func TestAddNames(t *testing.T) {
 		t.Errorf("messages:\n%s", errOut)
 	}
 
-	// Enter cancels.
 	svc = newFake("plop")
 	errOut, err = runAnswering(t, svc, "add https://github.com/x/plop", "\n")
 	if err != nil || len(svc.calls) != 1 || !strings.Contains(errOut, "Add cancelled.") {
@@ -338,7 +332,7 @@ func TestAddNames(t *testing.T) {
 }
 
 // runAnswering runs line as if on a terminal, answering its questions with
-// input. It returns the messages (stderr).
+// input.
 func runAnswering(t *testing.T, svc control.Service, line string, input string) (string, error) {
 	t.Helper()
 	var o, e bytes.Buffer
@@ -367,7 +361,6 @@ func TestAllReportsEachProject(t *testing.T) {
 }
 
 func TestOutputStreams(t *testing.T) {
-	// Data on stdout, messages on stderr.
 	out, errOut, err := run(t, newFake("plop"), "list")
 	if err != nil || !strings.Contains(out, "plop") || errOut != "1 project\n" {
 		t.Errorf("list: out %q, err %q, %v", out, errOut, err)

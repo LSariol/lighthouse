@@ -15,9 +15,7 @@ import (
 	"github.com/lsariol/lighthouse/internal/compose"
 )
 
-// TestRealBackup dumps a real Postgres the way a deploy of sparkdb does. It
-// needs a Docker daemon (and pulls postgres:16.4); it's skipped without one
-// or with -short.
+// TestRealBackup dumps a real Postgres the way a deploy of sparkdb does.
 func TestRealBackup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short")
@@ -37,7 +35,6 @@ func TestRealBackup(t *testing.T) {
 		t.Fatalf("docker run: %v\n%s", err, out)
 	}
 	for i := 0; ; i++ {
-		// Ready once the server answers over its socket as the admin user.
 		if exec.CommandContext(ctx, "docker", "exec", container, "psql", "-U", "Admin", "-d", "Admin_DB", "-c",
 			"CREATE TABLE IF NOT EXISTS marker (id int)").Run() == nil {
 			break
@@ -69,7 +66,6 @@ func TestRealBackup(t *testing.T) {
 		}
 	}
 
-	// A failing dump is an error, with what pg_dumpall said.
 	err = compose.Runner{}.Exec(ctx, container, []string{"sh", "-c", `pg_dumpall -U nobody`}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "nobody") {
 		t.Errorf("a failing dump = %v", err)

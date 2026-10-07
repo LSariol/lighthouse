@@ -15,10 +15,8 @@ import (
 // server's disk from a runaway archive.
 const MaxArchiveSize = 2 << 30 // 2 GB
 
-// extract unpacks a GitHub tarball (gzipped tar, every entry in one
-// top-level folder) into dest, dropping that folder. File modes are kept, so
-// scripts stay executable. Entries that would land outside dest, and links
-// pointing outside it, are refused.
+// extract unpacks a GitHub tarball (gzipped tar, every entry in one top-level
+// folder) into dest, dropping that folder.
 func extract(r io.Reader, dest string) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -45,14 +43,13 @@ func extract(r io.Reader, dest string) error {
 			return fmt.Errorf("read the archive: %w", err)
 		}
 
-		// GitHub's pax_global_header carries the commit; it isn't a file.
 		if hdr.Typeflag == tar.TypeXGlobalHeader || hdr.Typeflag == tar.TypeXHeader {
 			continue
 		}
 
 		rel := stripTop(hdr.Name)
 		if rel == "" {
-			continue // the top-level folder itself
+			continue
 		}
 		path, err := inside(root, rel)
 		if err != nil {
@@ -88,7 +85,6 @@ func extract(r io.Reader, dest string) error {
 				return fmt.Errorf("create link %q: %w", rel, err)
 			}
 		default:
-			// Hard links, devices and the like don't belong in a repository.
 		}
 	}
 }
@@ -113,8 +109,6 @@ func writeFile(path string, r io.Reader, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	// Owner can always read and write; group and others get what the
-	// repository says, at most read and execute.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode&0o755|0o600)
 	if err != nil {
 		return err

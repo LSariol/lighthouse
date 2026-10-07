@@ -1,9 +1,4 @@
-// Package control connects the CLI to the running daemon. `lighthouse serve`
-// owns all state; `lighthouse shell` and one-shot commands are separate
-// processes that reach it through a Unix socket, using HTTP and JSON.
-//
-// Service is what the CLI needs. The daemon implements it; Client implements
-// it by calling the daemon; Handler serves a Service over HTTP.
+// Package control connects the CLI to the daemon: HTTP and JSON over a Unix socket.
 package control
 
 import (
@@ -62,66 +57,64 @@ type Status struct {
 	Version      string        `json:"version"`
 	Env          string        `json:"env"`
 	StartedAt    time.Time     `json:"startedAt"`
-	Phase        string        `json:"phase"` // e.g. "running", "waiting for Cove", "waiting for the database"
+	Phase        string        `json:"phase"`
 	Paused       bool          `json:"paused"`
 	PollInterval time.Duration `json:"pollInterval"`
 	CoveURL      string        `json:"coveURL"`
-	GitHubToken  bool          `json:"githubToken"` // loaded from Cove
-	Database     string        `json:"database"`    // "reachable", "unreachable", or "" before startup connects
-	Schema       string        `json:"schema"`      // e.g. "version 2 (up to date)"
+	GitHubToken  bool          `json:"githubToken"`
+	Database     string        `json:"database"`
+	Schema       string        `json:"schema"`
 	Projects     []Project     `json:"projects"`
 }
 
 // Project is one watched repository.
 type Project struct {
-	Name           string `json:"name"`
-	URL            string `json:"url"`
-	ComposeProject string `json:"composeProject"` // as its compose file names it (or the repository's name before a deploy)
-	// State sums up its services, in Status only: "running", "degraded"
-	// (some aren't), "stopped" (none is) or "missing" (no containers).
-	State         string          `json:"state,omitempty"`
-	Services      []ServiceStatus `json:"services,omitempty"` // in Status only
-	Commit        string          `json:"commit,omitempty"`
-	Version       string          `json:"version,omitempty"` // the release deployed, in release mode
-	Mode          string          `json:"mode,omitempty"`    // "branch" or "releases" (x-lighthouse deploy)
-	Tier          string          `json:"tier,omitempty"`    // "data", "infra" or "app" (x-lighthouse tier)
-	Stopped       bool            `json:"stopped,omitempty"` // stopped on purpose: not deployed or brought back until started
-	WatchingSince time.Time       `json:"watchingSince"`
-	LastDeployed  *time.Time      `json:"lastDeployed,omitempty"`
-	LastChecked   *time.Time      `json:"lastChecked,omitempty"`
-	Checks        int             `json:"checks"`
-	LastError     string          `json:"lastError,omitempty"`
-	LastErrorAt   *time.Time      `json:"lastErrorAt,omitempty"`
-	FailureCount  int             `json:"failureCount,omitempty"`
-	Broken        bool            `json:"broken,omitempty"` // its latest commit failed too often; `retry` or a new commit
+	Name           string          `json:"name"`
+	URL            string          `json:"url"`
+	ComposeProject string          `json:"composeProject"`
+	State          string          `json:"state,omitempty"`
+	Services       []ServiceStatus `json:"services,omitempty"`
+	Commit         string          `json:"commit,omitempty"`
+	Version        string          `json:"version,omitempty"`
+	Mode           string          `json:"mode,omitempty"`
+	Tier           string          `json:"tier,omitempty"`
+	Stopped        bool            `json:"stopped,omitempty"`
+	WatchingSince  time.Time       `json:"watchingSince"`
+	LastDeployed   *time.Time      `json:"lastDeployed,omitempty"`
+	LastChecked    *time.Time      `json:"lastChecked,omitempty"`
+	Checks         int             `json:"checks"`
+	LastError      string          `json:"lastError,omitempty"`
+	LastErrorAt    *time.Time      `json:"lastErrorAt,omitempty"`
+	FailureCount   int             `json:"failureCount,omitempty"`
+	Broken         bool            `json:"broken,omitempty"`
 }
 
 // ServiceStatus is one service of a project, as running now.
 type ServiceStatus struct {
 	Name      string `json:"name"`
 	Container string `json:"container"`
-	State     string `json:"state"`            // "running", "exited", ...
-	Health    string `json:"health,omitempty"` // "healthy", "unhealthy", "starting", or "" without a healthcheck
+	State     string `json:"state"`
+	Health    string `json:"health,omitempty"`
 }
 
 // Deployment is one deploy attempt, from the project's history.
 type Deployment struct {
 	Commit      string    `json:"commit,omitempty"`
-	Version     string    `json:"version,omitempty"`     // the release deployed, if it was one
-	Trigger     string    `json:"trigger"`               // "check", "manual" or "reconcile"
-	Status      string    `json:"status"`                // "succeeded", "failed" or "rolled_back"
-	FailureKind string    `json:"failureKind,omitempty"` // "transient" or "permanent"
+	Version     string    `json:"version,omitempty"`
+	Trigger     string    `json:"trigger"`
+	Status      string    `json:"status"`
+	FailureKind string    `json:"failureKind,omitempty"`
 	FailedStep  string    `json:"failedStep,omitempty"`
 	StartedAt   time.Time `json:"startedAt"`
 	FinishedAt  time.Time `json:"finishedAt"`
 	Error       string    `json:"error,omitempty"`
-	Steps       []Step    `json:"steps,omitempty"` // in Report only
+	Steps       []Step    `json:"steps,omitempty"`
 }
 
 // Step is one step of a deployment.
 type Step struct {
 	Name       string    `json:"name"`
-	Status     string    `json:"status"` // "succeeded", "failed" or "skipped"
+	Status     string    `json:"status"`
 	StartedAt  time.Time `json:"startedAt"`
 	FinishedAt time.Time `json:"finishedAt"`
 	Log        string    `json:"log,omitempty"`

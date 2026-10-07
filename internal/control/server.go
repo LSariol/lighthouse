@@ -175,15 +175,13 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // Serve listens on the Unix socket at path and serves svc until ctx is
-// cancelled. The socket is readable and writable by its owner only: anyone
-// who can use it controls Lighthouse.
+// cancelled.
 func Serve(ctx context.Context, path string, svc Service) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("control socket: %w", err)
 	}
 
-	// A socket left behind by a previous run (e.g. after a crash) blocks
-	// Listen. Remove it, unless something is still answering on it.
+	// A stale socket from a crash blocks Listen; remove it unless something answers on it.
 	if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
 		conn.Close()
 		return fmt.Errorf("control socket %s is in use: is another Lighthouse running?", path)
@@ -204,8 +202,6 @@ func Serve(ctx context.Context, path string, svc Service) error {
 	server := &http.Server{
 		Handler:           Handler(svc),
 		ReadHeaderTimeout: 10 * time.Second,
-		// No write timeout: a deploy answers when it's done, which can take
-		// several minutes.
 	}
 
 	errs := make(chan error, 1)

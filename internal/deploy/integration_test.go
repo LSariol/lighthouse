@@ -14,9 +14,8 @@ import (
 )
 
 // TestRealDeployAndRollback deploys a small project with the real docker
-// compose and Docker: version 1, then a version 2 that never becomes
-// healthy, which must be rolled back to version 1. It needs a Docker daemon
-// and is skipped without one (or with -short).
+// compose and Docker: version 1, then a version 2 that never becomes healthy,
+// which must be rolled back to version 1.
 func TestRealDeployAndRollback(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short")
@@ -79,7 +78,6 @@ services:
 		return strings.TrimSpace(string(out))
 	}
 
-	// Version 1.
 	source.archive = tarball(t, version("v1", true))
 	res := dep.Deploy(ctx, Request{Project: p, SHA: sha1, Token: "t"})
 	if res.Status != projects.StatusSucceeded {
@@ -92,7 +90,6 @@ services:
 		t.Error("the secret's value is in the log")
 	}
 
-	// Version 2 never becomes healthy: rolled back to version 1.
 	p.DeployedSHA, p.ComposeProject = sha1, project
 	source.archive = tarball(t, version("v2", false))
 	res = dep.Deploy(ctx, Request{Project: p, SHA: sha2, Token: "t"})
@@ -103,7 +100,6 @@ services:
 		t.Errorf("v2's error: %v", res.Err)
 	}
 
-	// The rollback brought version 1 back, and it's healthy.
 	deadline := time.Now().Add(30 * time.Second)
 	for running() != "v1" && time.Now().Before(deadline) {
 		time.Sleep(time.Second)

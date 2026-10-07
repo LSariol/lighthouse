@@ -91,10 +91,7 @@ Run "lighthouse help" to list the CLI commands.
 `)
 }
 
-// runServe runs the daemon until SIGINT or SIGTERM (docker stop). With
-// withShell (plain `lighthouse`), the CLI also runs on this terminal, talking
-// to the daemon directly; `exit` there stops Lighthouse. `lighthouse serve`
-// runs the daemon alone, as in Docker.
+// runServe runs the daemon until SIGINT or SIGTERM (docker stop).
 func runServe(withShell bool) {
 	cfg := loadConfig()
 	if err := cfg.ValidateServe(); err != nil {
@@ -116,14 +113,10 @@ func runServe(withShell bool) {
 
 	d := daemon.New(cfg, version, dockerClient, compose.Runner{})
 
-	// The CLI can connect right away, so `status` shows startup progress
-	// while Lighthouse waits for Cove and the database.
 	controlDone := make(chan error, 1)
 	go func() { controlDone <- control.Serve(ctx, cfg.ControlSocket, d) }()
 
 	if withShell {
-		// When stdin closes (no terminal), the CLI returns and Lighthouse
-		// keeps running; `exit`, Ctrl+C and `docker stop` all cancel ctx.
 		shell := cli.New(d, cli.Options{Env: cfg.Env, Embedded: true})
 		go shell.Run(ctx, stop)
 	}
@@ -152,9 +145,6 @@ func runServe(withShell bool) {
 	case <-ctx.Done():
 	}
 
-	// A deploy that already swapped finishes its check (or rollback) even
-	// though Lighthouse is stopping; docker-compose.yml gives it the time
-	// (stop_grace_period).
 	slog.Info("Lighthouse stopping")
 	select {
 	case <-loopDone:
@@ -166,8 +156,7 @@ func runServe(withShell bool) {
 }
 
 // start connects to Cove and the database, migrates it, and hands the daemon
-// its store and orchestrator. While Cove or the database is unreachable it
-// waits and retries; other errors end startup.
+// its store and orchestrator.
 func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClient *docker.Client) (*database.Database, *orchestrator.Orchestrator, error) {
 	rules, err := policy.Parse(lighthouse.PolicyFile)
 	if err != nil {
@@ -176,8 +165,6 @@ func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClien
 	if len(rules.Exceptions) > 0 {
 		slog.Info("deploy rule exceptions loaded", "exceptions", len(rules.Exceptions))
 	}
-	// The data folders are read to follow symlinks a container may have left
-	// there; without them, a link can't be spotted.
 	if _, err := os.Stat(cfg.StoragePath); err != nil {
 		slog.Warn("STORAGE_PATH isn't readable, so symlinks in the projects' data folders can't be checked: mount it read-only at the same path",
 			"path", cfg.StoragePath, "err", err)
@@ -200,10 +187,6 @@ func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClien
 		return nil, nil, err
 	}
 
-	// The archive download has no overall timeout of its own: the fetch
-	// step's deadline limits it. Commit checks are quick, so 30 seconds.
-	// Lighthouse's own compose project: its deploys hand off to the update
-	// helper. Outside Docker there's none.
 	self, err := dockerClient.SelfProject(ctx)
 	if err != nil {
 		slog.Warn("self-update is off: Lighthouse can't find its own container", "err", err)
@@ -230,8 +213,7 @@ func start(ctx context.Context, cfg config.Config, d *daemon.Daemon, dockerClien
 }
 
 // openDatabase applies pending migrations as the migrator, then connects as
-// the app and checks the schema. While the database is unreachable (e.g.
-// sparkdb restarting), it waits and retries.
+// the app and checks the schema.
 func openDatabase(ctx context.Context, d *daemon.Daemon, secrets cove.Secrets) (*database.Database, error) {
 	for {
 		d.SetPhase(daemon.PhaseMigrating)
@@ -272,10 +254,7 @@ func runShell() {
 	shell.Run(ctx, stop)
 }
 
-// runCommand runs one CLI command, e.g. `lighthouse status`, and returns the
-// process exit status: 0 on success, 1 on failure.
-// runHealth is the container's healthcheck: healthy once the daemon answers
-// on its control socket, whatever it's waiting for (Cove, the database).
+// runHealth is the container's healthcheck: 0 once the daemon answers.
 func runHealth() int {
 	cfg := loadConfig()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -289,9 +268,7 @@ func runHealth() int {
 	return 0
 }
 
-// runSelfUpdate is the update helper (see internal/deploy/selfupdate.go): it
-// swaps Lighthouse to the version it runs from, waits until it's healthy,
-// and puts the old one back if it isn't.
+// runSelfUpdate is the update helper's work (internal/deploy/selfupdate.go).
 func runSelfUpdate(args []string) int {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "Usage: lighthouse self-update <hand-off file>")
@@ -304,8 +281,6 @@ func runSelfUpdate(args []string) int {
 	}
 	defer dockerClient.Close()
 
-	// The swap and its check aren't cut off: the helper is the only one
-	// that can finish what it started.
 	deployer := deploy.New(compose.Runner{}, dockerClient, nil, nil, deploy.Options{
 		Root: filepath.Dir(filepath.Dir(args[0])),
 		Log:  os.Stderr,
@@ -318,6 +293,7 @@ func runSelfUpdate(args []string) int {
 	return 0
 }
 
+// runCommand runs one CLI command and returns the exit status.
 func runCommand(args []string) int {
 	cfg := loadConfig()
 
@@ -340,7 +316,6 @@ func adminSecrets(ctx context.Context, cfg config.Config) cove.Secrets {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	// Don't wait forever for a closed bootstrap or a missing Cove: say so.
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -381,8 +356,7 @@ func runMigrate(args []string) {
 }
 
 // runImport handles `lighthouse import <file|->`: it adds every project in a
-// pre-1.0 repos.json to the database, with its recorded state. Projects that
-// are already there are skipped, so running it twice is safe.
+// pre-1.0 repos.json to the database, with its recorded state.
 func runImport(args []string) {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "! Usage: lighthouse import <file|->   (- reads standard input)")
@@ -445,8 +419,6 @@ func loadConfig() config.Config {
 }
 
 // buildVersion returns LIGHTHOUSE_VERSION (set in docker-compose.yml).
-// Without it, as in a local build, it's "dev" plus the git commit Lighthouse
-// was built from when Go recorded one.
 func buildVersion(cfg config.Config) string {
 	if cfg.Version != "" {
 		return cfg.Version
@@ -462,8 +434,7 @@ func buildVersion(cfg config.Config) string {
 	return "dev"
 }
 
-// fatal prints an error and exits. A clear one-line message is more useful
-// here than a panic's stack trace, especially in docker logs.
+// fatal prints an error and exits.
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "lighthouse: %v\n", err)
 	os.Exit(1)

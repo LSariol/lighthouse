@@ -129,7 +129,7 @@ func allOrNothing(args []string) bool {
 }
 
 // eachProject runs fn for every watched project, reporting each one, and
-// fails if any failed. verb ("deploy") and done ("Deployed") word the messages.
+// fails if any failed.
 func (c *CLI) eachProject(ctx context.Context, verb string, done string, fn func(context.Context, string) error) error {
 	projects, err := c.svc.Projects(ctx)
 	if err != nil {

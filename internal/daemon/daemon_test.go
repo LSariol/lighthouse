@@ -124,7 +124,6 @@ func TestTargets(t *testing.T) {
 	d, c, _, _ := newDaemon(t)
 	ctx := context.Background()
 
-	// The whole project: every service.
 	if err := d.Restart(ctx, "personalwebsite"); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +131,6 @@ func TestTargets(t *testing.T) {
 		t.Errorf("actions = %v", c.actions)
 	}
 
-	// One service.
 	c.actions = nil
 	if err := d.Stop(ctx, "personalWebsite:bot"); err != nil {
 		t.Fatal(err)
@@ -149,8 +147,6 @@ func TestTargets(t *testing.T) {
 		t.Errorf("an unwatched name = %v", err)
 	}
 
-	// Stopping one service isn't stopping the project; stopping the whole
-	// project is, until it's started (or restarted) again.
 	if p, _ := d.Projects(ctx); p[0].Stopped {
 		t.Error("stopping one service marked the project stopped")
 	}
@@ -163,7 +159,6 @@ func TestTargets(t *testing.T) {
 		t.Error("start didn't clear stopped")
 	}
 
-	// Logs of several services come with headers; of one, without.
 	logs, err := d.Logs(ctx, "personalWebsite", 10)
 	if err != nil || !strings.Contains(logs, "==> personalWebsite:web <==\noutput of id-web") {
 		t.Errorf("Logs = %q, %v", logs, err)
@@ -202,7 +197,6 @@ func TestStatusSummarizesServices(t *testing.T) {
 		t.Errorf("services = %+v", svc)
 	}
 
-	// A one-off job that finished doesn't count against it.
 	c.byProject["website"] = append(c.byProject["website"], docker.Container{ID: "id-mig", Service: "migrate", State: "exited", ExitCode: 0})
 	if got := state(); got != "running" {
 		t.Errorf("with a finished job: %q", got)

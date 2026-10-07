@@ -46,7 +46,6 @@ func open(t *testing.T) *Database {
 	}
 	t.Cleanup(db.Close)
 
-	// Deployments go with their projects (ON DELETE CASCADE).
 	if _, err := db.pool.Exec(ctx, `DELETE FROM lighthouse.projects`); err != nil {
 		t.Fatal(err)
 	}
@@ -153,14 +152,12 @@ func TestUnreachable(t *testing.T) {
 	if err == nil || !IsUnreachable(err) || !strings.Contains(err.Error(), "LIGHTHOUSE_DATABASE_URL") {
 		t.Errorf("Connect to nothing = %v (unreachable: %v)", err, IsUnreachable(err))
 	}
-	// Startup waits and retries on this, so it has to survive goose's wrapping.
 	if err := Migrate(context.Background(), nowhere); err == nil || !IsUnreachable(err) {
 		t.Errorf("Migrate against nothing = %v (unreachable: %v)", err, IsUnreachable(err))
 	}
 	if appURL == "" {
 		return
 	}
-	// A wrong password is an answer, not an outage.
 	wrong := strings.Replace(appURL, "lighthouse_app:", "lighthouse_app:wrong", 1)
 	if _, err := Connect(context.Background(), wrong); err == nil || IsUnreachable(err) {
 		t.Errorf("Connect with a wrong password = %v (unreachable: %v)", err, IsUnreachable(err))

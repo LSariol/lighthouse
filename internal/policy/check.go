@@ -11,21 +11,12 @@ import (
 
 // Input is what Check needs about one deploy.
 type Input struct {
-	Project string // the compose project
-	// Config is `docker compose config --no-interpolate --format json`:
-	// paths are absolute, and ${...} are left as they are.
-	Config []byte
-	Dir    string // the deploy folder: the repository's files
-	// Storage is the root of the projects' data folders (/srv/server/storage):
-	// a project may use Storage/<compose project>/ and nothing else on the host.
+	Project string
+	Config  []byte
+	Dir     string
 	Storage string
-	Secrets []string // the ${KEY}s fetched from Cove
-	// Taken holds the names already answered on the shared network by other
-	// projects' containers: name → the container that has it.
-	Taken map[string]string
-	// Resolve follows symlinks in a host path; ResolvePath if nil. A symlink
-	// in the repository, or one a container left in its data folder, mustn't
-	// lead a mount outside the allowed folders.
+	Secrets []string
+	Taken   map[string]string
 	Resolve func(path string) string
 }
 
@@ -34,7 +25,7 @@ type Input struct {
 var readOnlyHostFiles = map[string]bool{"/etc/localtime": true, "/etc/timezone": true}
 
 // Check returns everything in the compose file the rules refuse or warn
-// about. Pass the findings to Policy.Apply for the ones that stop a deploy.
+// about.
 func Check(in Input) ([]Finding, error) {
 	var cfg config
 	if err := json.Unmarshal(in.Config, &cfg); err != nil {
@@ -138,8 +129,7 @@ type pathItem string
 func (p *pathItem) UnmarshalJSON(b []byte) error {
 	var s string
 	if json.Unmarshal(b, &s) == nil {
-		// The short syntax "host:container[:perms]" names the host side first.
-		if i := strings.Index(s, ":"); i > 1 { // not a Windows drive letter
+		if i := strings.Index(s, ":"); i > 1 {
 			s = s[:i]
 		}
 		*p = pathItem(s)
@@ -167,12 +157,10 @@ func (f *flexString) UnmarshalJSON(b []byte) error {
 }
 
 type checker struct {
-	in      Input
-	cfg     config
-	roots   []string // where the project's host paths may be: its files and its data folder
-	storage string
-	// resolvedRoots are roots with symlinks followed, to compare resolved
-	// paths with.
+	in            Input
+	cfg           config
+	roots         []string
+	storage       string
 	resolvedRoots []string
 	findings      []Finding
 }
@@ -224,8 +212,6 @@ func (c *checker) service(name string, s service) {
 		case "bind":
 			c.hostMount(name, m.Source, m.ReadOnly)
 		case "volume":
-			// A named volume is checked with the project's volumes; an
-			// anonymous one belongs to the container.
 		}
 	}
 	for _, f := range s.EnvFile {
@@ -276,7 +262,7 @@ func (c *checker) namespace(service string, field string, value string) {
 }
 
 // hostMount allows a bind mount from the repository's files or the project's
-// data folder. Paths in findings use forward slashes, as policy.json does.
+// data folder.
 func (c *checker) hostMount(service string, source string, readOnly bool) {
 	ok, link := c.inside(source)
 	path := filepath.ToSlash(filepath.Clean(source))
@@ -333,9 +319,6 @@ func (c *checker) storageHint() string {
 }
 
 // inside reports whether a host path is in one of the project's own folders.
-// Those are where a repository or a container could leave a symlink, so a
-// path inside them is followed; when it leads out, link is where to.
-// Elsewhere the path is taken as written, so an exception can name it.
 func (c *checker) inside(path string) (ok bool, link string) {
 	if path == "" {
 		return true, ""
@@ -436,7 +419,6 @@ func (c *checker) names(service string, s service) {
 		if !c.isShared(netKey) {
 			continue
 		}
-		// Compose adds the service's name to every network it joins.
 		names := []string{service}
 		if s.ContainerName != "" {
 			names = append(names, s.ContainerName)
@@ -483,8 +465,7 @@ func ResolvePath(path string) string {
 		if resolved, err := filepath.EvalSymlinks(p); err == nil {
 			return filepath.Join(resolved, rest)
 		} else if _, statErr := os.Lstat(p); statErr == nil {
-			// It exists but can't be resolved (a broken or looping link):
-			// don't trust it.
+			// A broken or looping link: don't trust it.
 			return path + string(filepath.Separator) + "(unresolvable link)"
 		}
 		parent := filepath.Dir(p)

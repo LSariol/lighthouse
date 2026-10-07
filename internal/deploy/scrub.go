@@ -15,13 +15,11 @@ const minSecretLength = 4
 // hidden replaces a secret value in output.
 const hidden = "[secret]"
 
-// scrubber writes complete lines to every writer in out, with every secret
-// value replaced. It holds back a partial line until its end arrives (or
-// Flush), so a value split across two writes is still found.
+// scrubber writes complete lines with every secret value hidden.
 type scrubber struct {
 	mu      sync.Mutex
 	out     []io.Writer
-	secrets []string // longest first, so a value containing another is hidden whole
+	secrets []string
 	partial []byte
 }
 
