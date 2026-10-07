@@ -6,7 +6,7 @@ Lighthouse keeps the projects on a personal server up to date. It watches your G
 
 It's built for one person running their own projects on their own hardware: a homelab, a spare PC, a small Debian box behind a Cloudflare tunnel.
 
-> **Status:** working and in daily use, currently being polished for its **v1.0.0** release. Expect changes. See [DOCUMENTATION.md](DOCUMENTATION.md) for the details and the roadmap.
+> **Status:** v1.0.0, in daily use. [DOCUMENTATION.md](DOCUMENTATION.md) has the details, and what may come later.
 
 ---
 
@@ -73,10 +73,10 @@ networks:
 Then tell Lighthouse about it:
 
 ```
-add myapp https://github.com/you/myapp
+add https://github.com/you/myapp
 ```
 
-That's it. The next push to `main` deploys it. A healthcheck on your services lets Lighthouse tell whether a new version really works before it keeps it. The full list of rules (naming, storage folders, a few gotchas) is in [DOCUMENTATION.md §7](DOCUMENTATION.md#7-connecting-a-project-the-contract).
+That's it: it's named after the repository, and the next push to `main` deploys it. To deploy only release tags (`v1.2.3`) instead, add `x-lighthouse: {deploy: releases}` to the compose file. A healthcheck on your services lets Lighthouse tell whether a new version really works before it keeps it. The full list of rules (naming, storage folders, a few gotchas) is in [DOCUMENTATION.md §7](DOCUMENTATION.md#7-connecting-a-project-the-contract).
 
 ---
 
@@ -94,7 +94,7 @@ You'll need a Linux server with Docker and Docker Compose, a Postgres server for
    ```bash
    git clone https://github.com/lsariol/lighthouse.git
    cd lighthouse
-   docker compose up -d --build
+   LIGHTHOUSE_DEPLOY_VERSION=v1.0.0 docker compose up -d --build
    ```
 3. **Open the control prompt** and add your first project:
    ```bash
@@ -102,7 +102,7 @@ You'll need a Linux server with Docker and Docker Compose, a Postgres server for
    ```
    Type `help` to see everything it can do, and `exit` to leave (Lighthouse keeps running). Single commands work too: `docker exec lighthouse /lighthouse status`.
 
-On its first start Lighthouse picks up its Cove access automatically. After that it just runs, and it comes back after a reboot.
+On its first start Lighthouse picks up its Cove access automatically. After that it just runs, and it comes back after a reboot. Add Lighthouse's own repository too (`add https://github.com/lsariol/lighthouse`) and it updates itself whenever a new release is tagged.
 
 ## Everyday commands
 

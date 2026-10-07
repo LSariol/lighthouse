@@ -100,9 +100,10 @@ func (c *CLI) scan(ctx context.Context, args []string) error {
 	return nil
 }
 
+// pause and resume act on every project: "pause all" reads the same.
 func (c *CLI) pause(ctx context.Context, args []string) error {
-	if len(args) != 1 {
-		return usageError{form: "pause"}
+	if !allOrNothing(args) {
+		return usageError{form: "pause [all]"}
 	}
 	if err := c.svc.Pause(ctx); err != nil {
 		return err
@@ -112,14 +113,19 @@ func (c *CLI) pause(ctx context.Context, args []string) error {
 }
 
 func (c *CLI) resume(ctx context.Context, args []string) error {
-	if len(args) != 1 {
-		return usageError{form: "resume"}
+	if !allOrNothing(args) {
+		return usageError{form: "resume [all]"}
 	}
 	if err := c.svc.Resume(ctx); err != nil {
 		return err
 	}
 	success("Automatic deploys resumed.")
 	return nil
+}
+
+// allOrNothing reports whether a command got no argument, or just "all".
+func allOrNothing(args []string) bool {
+	return len(args) == 1 || len(args) == 2 && strings.EqualFold(args[1], "all")
 }
 
 // eachProject runs fn for every watched project, reporting each one, and

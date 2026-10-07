@@ -214,6 +214,19 @@ func TestDeployVersion(t *testing.T) {
 	}
 }
 
+func TestPauseAll(t *testing.T) {
+	svc := newFake("plop")
+	for _, line := range []string{"pause", "pause all", "resume", "RESUME ALL"} {
+		if _, _, err := run(t, svc, line); err != nil {
+			t.Errorf("%s: %v", line, err)
+		}
+	}
+	var usage usageError
+	if _, _, err := run(t, svc, "pause plop"); !errors.As(err, &usage) {
+		t.Errorf("pause plop = %v, want a usage error (pause is for every project)", err)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	svc := newFake("cove")
 	_, errOut, err := run(t, svc, "rollback cove")
