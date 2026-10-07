@@ -3,11 +3,7 @@
 .env
 .env.*
 !.env.example
-cove-token
 .dev
-config
-Server
-RawGitResponse.json
 scripts
 
 .git

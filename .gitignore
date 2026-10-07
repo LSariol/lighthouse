@@ -1,11 +1,5 @@
 # Local configuration and secrets
 .env
-cove-token
 
-# Local development state (see .env.example)
+# Local development state, the dev Cove token included (see .env.example)
 /.dev/
-
-# Left over from the pre-1.0 layout
-/Server/
-/config/
-RawGitResponse.json
