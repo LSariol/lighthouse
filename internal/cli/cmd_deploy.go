@@ -242,7 +242,7 @@ func printDeployment(d control.Deployment) {
 		{"Commit", orDash(strings.TrimSpace(d.Version + " " + d.Commit))},
 		{"Started", formatTime(&started) + " (" + d.Trigger + ")"},
 		{"Took", took(d.StartedAt, d.FinishedAt)},
-		{"Result", result(d) + kindNote(d.FailureKind)},
+		{"Result", result(d) + kindNote(d)},
 	})
 	if d.Error != "" {
 		out("")
@@ -273,8 +273,13 @@ func result(d control.Deployment) string {
 	}
 }
 
-func kindNote(kind string) string {
-	switch kind {
+// kindNote says what a failure means for the project; a dry run (`check`)
+// records nothing, so it means nothing.
+func kindNote(d control.Deployment) string {
+	if d.Trigger == "dry run" {
+		return ""
+	}
+	switch d.FailureKind {
 	case "transient":
 		return " (a passing problem: tried again next check)"
 	case "permanent":

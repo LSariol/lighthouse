@@ -229,9 +229,13 @@ func (r Runner) Exec(ctx context.Context, container string, command []string, st
 }
 
 // RunDetached starts a container in the background: docker run -d --name
-// name -v volume... image command... (e.g. the self-update helper).
+// name -v volume... image command... (e.g. the self-update helper). An image
+// built by Compose carries its project's labels, which a container inherits;
+// they're cleared, so the container isn't taken for one of the project's
+// services.
 func (r Runner) RunDetached(ctx context.Context, name string, image string, volumes []string, command []string) error {
-	args := []string{"run", "-d", "--name", name}
+	args := []string{"run", "-d", "--name", name,
+		"--label", "com.docker.compose.project=", "--label", "com.docker.compose.service="}
 	for _, v := range volumes {
 		args = append(args, "-v", v)
 	}

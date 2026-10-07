@@ -40,6 +40,7 @@ type Deployer interface {
 	Deploy(ctx context.Context, req deploy.Request) deploy.Result
 	Check(ctx context.Context, req deploy.Request) deploy.Result
 	HandOffs() ([]deploy.HandOff, error)
+	HandOffInProgress(project string) bool
 	Forget(h deploy.HandOff) error
 }
 
@@ -47,6 +48,10 @@ type Deployer interface {
 // replacing this Lighthouse now, and the result is recorded by the one that
 // runs afterwards.
 var ErrHandedOff = errors.New("handed off to the update helper")
+
+// ErrUpdating means Lighthouse is updating itself: the update helper hasn't
+// finished, so Lighthouse isn't deployed again meanwhile.
+var ErrUpdating = errors.New("a self-update is in progress")
 
 // GitHub answers what's new in a repository. github.Client implements it.
 type GitHub interface {
@@ -85,6 +90,10 @@ type Orchestrator struct {
 	paused   atomic.Bool
 	turn     turn // one deploy at a time, in order
 
+	recording    sync.Mutex    // one RecordHandOffs at a time
+	handOffPoll  time.Duration // how often a handed-off Lighthouse looks for the helper's result
+	pausedByHand atomic.Bool   // the pause came from a hand-off, not from `pause`
+
 	mu      sync.Mutex
 	watches map[string]*watch // by lowercased project name
 }
@@ -109,7 +118,7 @@ type watch struct {
 // reconcile loop.
 func New(store projects.Store, gh GitHub, deployer Deployer, containers Containers, gitToken string) *Orchestrator {
 	return &Orchestrator{store: store, github: gh, deployer: deployer, containers: containers, gitToken: gitToken,
-		now: time.Now, watches: map[string]*watch{}}
+		now: time.Now, watches: map[string]*watch{}, handOffPoll: 2 * time.Second}
 }
 
 func (o *Orchestrator) Pause()         { o.paused.Store(true) }
@@ -228,6 +237,10 @@ func (o *Orchestrator) check(ctx context.Context, p projects.Project) error {
 
 	t, ok, err := o.latest(ctx, &p, w)
 	switch {
+	case err == nil && ok && o.deployer.HandOffInProgress(p.Name):
+		// Lighthouse updating itself: the result is recorded when the
+		// helper finishes; until then, this is no new commit.
+		return o.record(ctx, p.Name, nil, true)
 	case err != nil:
 		o.wait(w, p.Name, err)
 	case !ok:
@@ -238,6 +251,9 @@ func (o *Orchestrator) check(ctx context.Context, p projects.Project) error {
 	default:
 		slog.Info("deploying", "project", p.Name, "what", t.String())
 		err = o.deploy(ctx, p, t, projects.TriggerCheck)
+		if errors.Is(err, ErrHandedOff) || errors.Is(err, ErrUpdating) {
+			err = nil // not a failure: the helper's result is recorded when it's in
+		}
 	}
 	return o.record(ctx, p.Name, err, true)
 }
@@ -527,6 +543,8 @@ func (o *Orchestrator) Retry(ctx context.Context, name string) error {
 // RecordHandOffs records Lighthouse's own updates once the helper has
 // finished them (or given up), as any deploy is recorded.
 func (o *Orchestrator) RecordHandOffs(ctx context.Context) {
+	o.recording.Lock()
+	defer o.recording.Unlock()
 	handOffs, err := o.deployer.HandOffs()
 	if err != nil {
 		slog.Error("self-update results can't be read", "err", err)
@@ -544,6 +562,9 @@ func (o *Orchestrator) RecordHandOffs(ctx context.Context) {
 
 // deploy waits for its turn, runs one deployment of p and records it.
 func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target, trigger string) error {
+	if o.deployer.HandOffInProgress(p.Name) {
+		return ErrUpdating
+	}
 	if err := o.turn.acquire(ctx, settings.Settings{Tier: p.Tier}.Order()); err != nil {
 		return err
 	}
@@ -580,10 +601,16 @@ func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target,
 
 	if res.HandedOff {
 		// This Lighthouse is about to be replaced: it keeps the turn, so
-		// nothing else starts, and stops checking.
+		// nothing else starts, and stops checking. If the helper finishes
+		// without replacing it (the new version is the same image), it
+		// records the result and carries on.
 		release = false
-		o.Pause()
+		if !o.IsPaused() {
+			o.pausedByHand.Store(true)
+			o.Pause()
+		}
 		slog.Info("self-update handed off: the helper replaces this Lighthouse now", "sha", short(t.sha), "helper", deploy.HelperName)
+		go o.awaitHandOff(p.Name)
 		return ErrHandedOff
 	}
 
@@ -626,6 +653,28 @@ func (o *Orchestrator) deploy(ctx context.Context, p projects.Project, t target,
 		return fmt.Errorf("%w after %d failed deploys of %s: %v", ErrBroken, now.FailureCount, t, res.Err)
 	}
 	return res.Err
+}
+
+// awaitHandOff runs in a Lighthouse that handed its own update off. Usually
+// the helper replaces it before anything happens here. If the helper
+// finishes and this Lighthouse is still running (nothing needed replacing),
+// it records the result, gives up the turn and resumes checking.
+func (o *Orchestrator) awaitHandOff(name string) {
+	ticker := time.NewTicker(o.handOffPoll)
+	defer ticker.Stop()
+	deadline := time.Now().Add(deploy.HandOffWait + time.Minute)
+	for range ticker.C {
+		if o.deployer.HandOffInProgress(name) && time.Now().Before(deadline) {
+			continue
+		}
+		slog.Info("the update helper finished without replacing this Lighthouse; recording the result and carrying on", "project", name)
+		o.RecordHandOffs(context.Background())
+		o.turn.release()
+		if o.pausedByHand.CompareAndSwap(true, false) {
+			o.Resume()
+		}
+		return
+	}
 }
 
 // recordRetries is how long recording a deployment keeps trying while the

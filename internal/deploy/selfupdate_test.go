@@ -167,7 +167,7 @@ func TestStaleHandOff(t *testing.T) {
 	e.d.Deploy(context.Background(), Request{Project: lighthouse, SHA: sha1})
 	path := filepath.Join(e.root, ".self-update", sha1[:12]+".json")
 	h, _ := readHandOff(path)
-	h.StartedAt = time.Now().Add(-handOffWait - time.Minute)
+	h.StartedAt = time.Now().Add(-HandOffWait - time.Minute)
 	writeHandOff(h)
 
 	ready, _ := e.d.HandOffs()
@@ -185,5 +185,33 @@ func TestHelperFailsToStart(t *testing.T) {
 	}
 	if ready, _ := e.d.HandOffs(); len(ready) != 0 {
 		t.Error("a hand-off was left behind")
+	}
+}
+
+func TestOneHandOffAtATime(t *testing.T) {
+	// While the helper works, a second self-update is refused: the
+	// Lighthouse that starts during the swap mustn't update itself again.
+	e := newSelfEnv(t)
+	if res := e.d.Deploy(context.Background(), Request{Project: lighthouse, SHA: sha1}); !res.HandedOff {
+		t.Fatalf("first Deploy = %+v", res)
+	}
+	if !e.d.HandOffInProgress("LIGHTHOUSE") || e.d.HandOffInProgress("plop") {
+		t.Error("HandOffInProgress doesn't see the hand-off (or sees it for another project)")
+	}
+	res := e.d.Deploy(context.Background(), Request{Project: lighthouse, SHA: sha1})
+	if res.HandedOff || res.FailedStep != StepHandOff || res.FailureKind != projects.FailureTransient || !strings.Contains(res.Err.Error(), "already in progress") {
+		t.Errorf("second Deploy = %+v", res)
+	}
+	if len(e.compose.helpers) != 1 || len(res.Steps) != 1 {
+		t.Errorf("helpers started: %v; steps %v (want only the refusal, before anything is downloaded)", e.compose.helpers, stepStatuses(res))
+	}
+	if _, err := os.Stat(filepath.Join(e.root, "lighthouse", sha1[:12], "compose.yaml")); err != nil {
+		t.Errorf("the refused deploy touched the helper's files: %v", err)
+	}
+
+	// Once the helper is done, it isn't in progress any more.
+	e.d.FinishHandOff(context.Background(), filepath.Join(e.root, ".self-update", sha1[:12]+".json"))
+	if e.d.HandOffInProgress("lighthouse") {
+		t.Error("still in progress after the helper finished")
 	}
 }

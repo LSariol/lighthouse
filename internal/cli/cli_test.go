@@ -68,10 +68,10 @@ func (f *fakeService) Check(ctx context.Context, name string) (control.Deploymen
 		return control.Deployment{}, err
 	}
 	now := time.Now()
-	d := control.Deployment{Commit: "abcdef123", Trigger: "check", Status: "succeeded", StartedAt: now, FinishedAt: now,
+	d := control.Deployment{Commit: "abcdef123", Trigger: "dry run", Status: "succeeded", StartedAt: now, FinishedAt: now,
 		Steps: []control.Step{{Name: "check", Status: "succeeded", Log: "the compose file follows the deploy rules"}}}
 	if name == "bad" {
-		d.Status, d.FailedStep, d.Error = "failed", "check", "check: the compose file breaks the deploy rules (privileged)"
+		d.Status, d.FailedStep, d.FailureKind, d.Error = "failed", "check", "permanent", "check: the compose file breaks the deploy rules (privileged)"
 		d.Steps[0] = control.Step{Name: "check", Status: "failed", Log: "✗ web: privileged: true gives the container root on the host [privileged]"}
 	}
 	return d, nil
@@ -531,7 +531,7 @@ func TestCheck(t *testing.T) {
 	}
 
 	out, _, err = run(t, newFake("bad"), "check bad")
-	if err == nil || !strings.Contains(err.Error(), "fails at check") || !strings.Contains(out, "[privileged]") {
+	if err == nil || !strings.Contains(err.Error(), "fails at check") || !strings.Contains(out, "[privileged]") || strings.Contains(out, "counts toward broken") {
 		t.Errorf("check bad: %v\n%s", err, out)
 	}
 

@@ -66,6 +66,7 @@ func (fakeDeployer) Check(ctx context.Context, req deploy.Request) deploy.Result
 }
 
 func (fakeDeployer) HandOffs() ([]deploy.HandOff, error) { return nil, nil }
+func (fakeDeployer) HandOffInProgress(string) bool       { return false }
 func (fakeDeployer) Forget(deploy.HandOff) error         { return nil }
 
 type fakeCommits struct{}

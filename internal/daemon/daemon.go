@@ -394,7 +394,7 @@ func (d *Daemon) Check(ctx context.Context, name string) (control.Deployment, er
 	}
 
 	out := control.Deployment{
-		Commit: sha, Trigger: "check", Status: res.Status, FailureKind: res.FailureKind, FailedStep: res.FailedStep,
+		Commit: sha, Trigger: "dry run", Status: res.Status, FailureKind: res.FailureKind, FailedStep: res.FailedStep,
 		StartedAt: started, FinishedAt: time.Now(),
 	}
 	if res.Err != nil {
@@ -409,6 +409,9 @@ func (d *Daemon) Check(ctx context.Context, name string) (control.Deployment, er
 func deployError(name string, err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, orchestrator.ErrUpdating) {
+		return control.Errorf(control.KindConflict, "Lighthouse is updating itself right now: %s isn't deployed until that's done. \"docker logs -f %s\" shows it; try again in a minute.", name, deploy.HelperName)
 	}
 	if errors.Is(err, orchestrator.ErrHandedOff) {
 		return control.Errorf(control.KindHandedOff, "Lighthouse is updating itself: the helper container %s is swapping it now, so this connection ends. \"docker logs -f %s\" shows how it goes; \"history %s\" has the result once Lighthouse is back.", deploy.HelperName, deploy.HelperName, name)

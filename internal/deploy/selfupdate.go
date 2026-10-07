@@ -38,9 +38,9 @@ const HelperName = "lighthouse-updater"
 // StepHandOff hands a self-update to the helper.
 const StepHandOff = "handoff"
 
-// handOffWait is how long a hand-off may stay unfinished before it's
+// HandOffWait is how long a hand-off may stay unfinished before it's
 // recorded as failed: the helper died, or was never started.
-const handOffWait = 30 * time.Minute
+const HandOffWait = 30 * time.Minute
 
 // HandOff is a self-update in progress: what the helper needs, and, once
 // it's done, how it went.
@@ -214,9 +214,8 @@ func (d *Deployer) FinishHandOff(ctx context.Context, path string) error {
 	return nil
 }
 
-// HandOffs returns the self-updates that are ready to record: finished by
-// the helper, or unfinished for too long (recorded as failed).
-func (d *Deployer) HandOffs() ([]HandOff, error) {
+// handOffs reads every hand-off file.
+func (d *Deployer) handOffs() ([]HandOff, error) {
 	entries, err := os.ReadDir(d.handOffDir())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -224,7 +223,7 @@ func (d *Deployer) HandOffs() ([]HandOff, error) {
 	if err != nil {
 		return nil, fmt.Errorf("self-update: read %s: %w", d.handOffDir(), err)
 	}
-	var ready []HandOff
+	var all []HandOff
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -234,17 +233,45 @@ func (d *Deployer) HandOffs() ([]HandOff, error) {
 			slog.Error("a self-update hand-off can't be read; it's left for a person to look at", "err", err)
 			continue
 		}
+		all = append(all, h)
+	}
+	return all, nil
+}
+
+// HandOffs returns the self-updates that are ready to record: finished by
+// the helper, or unfinished for too long (recorded as failed).
+func (d *Deployer) HandOffs() ([]HandOff, error) {
+	all, err := d.handOffs()
+	if err != nil {
+		return nil, err
+	}
+	var ready []HandOff
+	for _, h := range all {
 		if !h.Done {
-			if time.Since(h.StartedAt) < handOffWait {
+			if time.Since(h.StartedAt) < HandOffWait {
 				continue
 			}
 			h.Done, h.Status, h.FailureKind, h.FailedStep = true, projects.StatusFailed, projects.FailureTransient, StepHandOff
-			h.Error = fmt.Sprintf("the update helper didn't finish within %s; \"docker logs %s\" may say why", handOffWait, HelperName)
+			h.Error = fmt.Sprintf("the update helper didn't finish within %s; \"docker logs %s\" may say why", HandOffWait, HelperName)
 			h.FinishedAt = time.Now()
 		}
 		ready = append(ready, h)
 	}
 	return ready, nil
+}
+
+// HandOffInProgress reports whether the helper is still working on a
+// self-update of the project: one handed off, not yet finished, and not
+// given up on. Meanwhile nothing else deploys it: the Lighthouse that
+// starts during the swap would otherwise update itself again.
+func (d *Deployer) HandOffInProgress(project string) bool {
+	all, _ := d.handOffs()
+	for _, h := range all {
+		if !h.Done && strings.EqualFold(h.Project.Name, project) && time.Since(h.StartedAt) < HandOffWait {
+			return true
+		}
+	}
+	return false
 }
 
 // Forget deletes a recorded hand-off.

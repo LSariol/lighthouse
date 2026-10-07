@@ -134,6 +134,13 @@ type fakeDeployer struct {
 	result   func(req deploy.Request) deploy.Result
 	handOffs []deploy.HandOff
 	forgot   int
+	updating map[string]bool // projects whose self-update the helper is still working on
+}
+
+func (f *fakeDeployer) HandOffInProgress(project string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.updating[project]
 }
 
 func (f *fakeDeployer) Deploy(ctx context.Context, req deploy.Request) deploy.Result {
@@ -634,6 +641,20 @@ func TestSelfUpdate(t *testing.T) {
 		t.Errorf("a deploy after the hand-off = %v, want it to wait", err)
 	}
 
+	// While the helper works, checks don't deploy Lighthouse again, and
+	// that isn't an error; a deploy by hand says why it waits.
+	o3, store3, d3, _ := setup(t, newGitHub(map[string]string{"lighthouse": "newer"}), "lighthouse")
+	d3.updating = map[string]bool{"lighthouse": true}
+	if err := o3.Scan(ctx); err != nil || d3.count() != 0 {
+		t.Errorf("Scan during a self-update = %v, deployed %s", err, d3.list())
+	}
+	if p := get(t, store3, "lighthouse"); p.LastError != "" {
+		t.Errorf("last error %q", p.LastError)
+	}
+	if err := o3.Deploy(ctx, "lighthouse", ""); !errors.Is(err, ErrUpdating) {
+		t.Errorf("Deploy during a self-update = %v, want ErrUpdating", err)
+	}
+
 	// The next Lighthouse records how it went.
 	o2, _, d2, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new"}))
 	o2.store = store
@@ -647,6 +668,54 @@ func TestSelfUpdate(t *testing.T) {
 	}
 	if dep, _ := store.Deployment(ctx, "lighthouse", 1); dep.Trigger != projects.TriggerManual || len(dep.Steps) != 1 {
 		t.Errorf("recorded %+v", dep)
+	}
+}
+
+func TestHandOffWithoutReplacement(t *testing.T) {
+	// The helper finishes, but nothing replaced this Lighthouse (the new
+	// version was the same image): it records the result, gives up the
+	// turn and checks again.
+	o, store, d, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new", "app": "a1"}), "app", "lighthouse")
+	o.handOffPoll = 5 * time.Millisecond
+	ctx := context.Background()
+	d.result = func(req deploy.Request) deploy.Result {
+		if req.Project.Name == "lighthouse" {
+			d.updating = map[string]bool{"lighthouse": true}
+			return deploy.Result{HandedOff: true}
+		}
+		return deploy.Result{Status: projects.StatusSucceeded}
+	}
+	if err := o.Deploy(ctx, "lighthouse", ""); !errors.Is(err, ErrHandedOff) || !o.IsPaused() {
+		t.Fatalf("Deploy = %v, paused %v", err, o.IsPaused())
+	}
+
+	now := time.Now()
+	d.mu.Lock()
+	d.updating = nil
+	d.handOffs = []deploy.HandOff{{Project: projects.Project{Name: "lighthouse"}, SHA: "new", Trigger: projects.TriggerManual,
+		Done: true, Status: projects.StatusSucceeded, StartedAt: now, FinishedAt: now}}
+	d.mu.Unlock()
+
+	for i := 0; i < 200 && (o.IsPaused() || get(t, store, "lighthouse").DeployedSHA != "new"); i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if o.IsPaused() || get(t, store, "lighthouse").DeployedSHA != "new" {
+		t.Fatalf("paused %v, deployed %q", o.IsPaused(), get(t, store, "lighthouse").DeployedSHA)
+	}
+	// The turn is free again.
+	if err := o.Deploy(ctx, "app", ""); err != nil {
+		t.Errorf("a deploy after the hand-off was recorded = %v", err)
+	}
+
+	// A pause from the operator outlives a hand-off.
+	o2, _, d2, _ := setup(t, newGitHub(map[string]string{"lighthouse": "new"}), "lighthouse")
+	o2.handOffPoll = 5 * time.Millisecond
+	d2.result = func(deploy.Request) deploy.Result { return deploy.Result{HandedOff: true} }
+	o2.Pause()
+	o2.Deploy(ctx, "lighthouse", "")
+	time.Sleep(50 * time.Millisecond)
+	if !o2.IsPaused() {
+		t.Error("a hand-off undid the operator's pause")
 	}
 }
 

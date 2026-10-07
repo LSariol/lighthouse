@@ -293,6 +293,16 @@ func (r *run) deploy(ctx context.Context) Result {
 		return res
 	}
 
+	// While the update helper works on this project (Lighthouse itself),
+	// nothing else touches it: not even the download, which would replace
+	// the files the helper is swapping to.
+	if !r.dry && r.d.HandOffInProgress(r.req.Project.Name) {
+		f := r.step(ctx, StepHandOff, func(ctx context.Context, out io.Writer) *failure {
+			return transient(fmt.Errorf("a self-update is already in progress; it's tried again once that one is recorded (\"docker logs -f %s\" shows it)", HelperName))
+		})
+		return fail(StepHandOff, f)
+	}
+
 	incoming := filepath.Join(r.d.root, ".incoming", short12(r.req.SHA))
 	if r.dry {
 		incoming = filepath.Join(r.d.root, ".check", short12(r.req.SHA))
