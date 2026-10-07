@@ -1061,6 +1061,9 @@ Seen in practice: `lsariol/landing` (compose project `website`, services `web`, 
 ### Security issues
 
 #### S1. Any watched repo can read any secret in Cove
+**Status: fixed where it matters; the rest accepted as a risk (decided 2026-10-07).** Since step 4, a project only gets its own keys (`<PROJECT>_*`) and `SHARED_*`; anything else is refused before Cove is asked ([§7.1](#71-the-deploy-rules)). The Cove-side design below (delegated reads, network-bound tokens) **won't be built**: it only helps when someone holds Lighthouse's token file without controlling Lighthouse or the server, and in this setup that file is useless elsewhere (Cove publishes no port; it's reachable only on `spark`) and no project can mount it (the deploy rules). A compromised Lighthouse or server has everything regardless, through the Docker socket. What remains: treat the token file like the vault key (root-only, `0600`; a backup of `/srv/server/storage` that leaves the server is sensitive).
+
+The original analysis:
 **Critical.** `internal/deploy/compose.go` (`composeUp`).
 Lighthouse's token reads `*`, and Lighthouse fetches **whatever** `${KEY}` a project's compose file names. If a compose file in one project contains `- X=${SPARK_DATABASE_ADMIN_PASSWORD}` or `${BOTSUITE_COVE_TOKEN}`, that project's container gets the value. The cause could be a mistake, a compromised dependency that edits files, or anyone with push access. This bypasses all of Cove's per-project scoping: Lighthouse acts as a "confused deputy".
 A second, related risk: the token **file** (`/srv/server/storage/lighthouse/cove/token`) is a portable credential that reads everything. Every container on `spark` can reach `cove:2100`, so whoever gets a copy of that file (from a backup, a copy taken off the server, or a careless bind mount in another project) reads the whole vault **without** needing root.
@@ -1151,7 +1154,7 @@ The current code is small, about 1,400 lines, and its core flow has structural p
 | Lighthouse deploying itself | **Yes**, through a helper container ([F9](#f9-self-update)), in release-only mode |
 | Private repos | **Supported** (downloads through the API with the token) |
 | GitHub token | **Fine-grained**, read-only: `Contents`, `Metadata` on the watched repos. Expiry is warned about ahead of time ([F5](#f5-efficient-reliable-change-detection)) |
-| Lighthouse's Cove token | **Unchanged for now** (`--allow '*'`). Lighthouse refuses keys from another project's prefix. The Cove-side design (delegated reads, network-bound tokens) is **deferred** and revisited at the end of v1.0.0 ([S1](#s1-any-watched-repo-can-read-any-secret-in-cove)) |
+| Lighthouse's Cove token | **Unchanged** (`--allow '*'`). Lighthouse refuses keys from another project's prefix. The Cove-side design was **dropped** on 2026-10-07: an accepted risk ([S1](#s1-any-watched-repo-can-read-any-secret-in-cove)) |
 | Control | `lighthouse serve` (the daemon; clean logs in `docker logs`), `lighthouse shell` (the prompt, via `docker exec -it`), one-shot commands. No `docker attach`, no TTY on the container |
 | Orchestration | A **reconcile loop**: the database says what should be running; Docker says what is; Lighthouse closes the gap ([F16](#f16-reconcile-loop)) |
 | Infrastructure projects (sparkdb, Cove, cloudflared) | A separate tier: approval before deploy, backup first, deployed alone ([16.5](#165-infrastructure-projects)) |
@@ -1426,9 +1429,9 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
    - Going back for a project that deploys commits: `deploy <name> <commit>` and `rollback <name>` (F3). The rest of F7 is done; `approve` and `set` were dropped.
    - The helper container: build the new image, finish the current deploy, swap, wait for healthy, put the old one back if not.
    - Also: `LIGHTHOUSE_DEPLOY_COMMIT`/`_VERSION` for every deploy; migration `00005`; every error says where it comes from (GitHub: which request and the usual cause; Docker; the database; Cove), and errors that were dropped are reported; an end-to-end test (`scripts/e2e-self-update.sh`).
-7. **Release preparation — done** (2026-10-07), except the S1 decision:
+7. **Release preparation — done** (2026-10-07):
    - CHANGELOG, README, this document; the deploy-day steps in [§10](#10-deploying-lighthouse) (steps 1–8 of the upgrade) and the rollout plan.
-   - **S1, for Lu to decide:** recommended **after** v1.0.0, as Cove v1.1.0. Lighthouse's own rule already refuses another project's keys before Cove is asked ([§7.1](#71-the-deploy-rules)), which covers the realistic risk (a copied compose file); what Cove v1.1.0 would add is defence against a stolen token file and an audit that names the project. Doing it first would change Cove, CoveClient and Lighthouse together, right before a release. The fixed IP on `spark` belongs to that work.
+   - **S1: accepted as a risk** (2026-10-07), no Cove change: see [S1](#s1-any-watched-repo-can-read-any-secret-in-cove).
 8. **Notifications (F4): to revisit.** Lu is thinking it over. The draft (2026-10-07):
    - A small program of its own on Lu's Windows PC, started at login, with one inbound API (`POST /v1/notify`: title, message, level, source; a bearer token) that shows a Windows notification. Any project could use it, not only Lighthouse.
    - Lighthouse would notify on: a deploy failed, rolled back or left a project broken; Cove or GitHub unreachable; the reconcile loop bringing a project back; a self-update; the GitHub token close to expiring (F5).
