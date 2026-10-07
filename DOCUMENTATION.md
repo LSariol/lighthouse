@@ -1164,6 +1164,7 @@ See [16.3](#163-the-deploy-pipeline). One worker processes a queue; the poller, 
 Every successful build is tagged `lighthouse/<project>:<version>` (the tag in release-only mode, otherwise the short SHA). The last 3 are kept. `rollback <project> [version]` by hand; automatic when the post-swap check fails.
 
 #### F4. Notifications
+**To revisit** ([16.8](#168-order-of-work) item 8): the current draft is a small notifier on Lu's Windows PC instead of Discord. The original plan:
 A Discord webhook (`LIGHTHOUSE_DISCORD_WEBHOOK_URL` in Cove) on deploy succeeded, failed, broken, rolled back, waiting for approval; on Cove or GitHub unreachable or a token rejected; on a GitHub token expiring within 14 days; and on a container crash-looping (F16). Optionally a daily summary.
 
 #### F5. Efficient, reliable change detection
@@ -1388,13 +1389,20 @@ Each step is a short-lived branch merged into `release/1.0.0`, and prod changes 
    - Growing waits after passing failures (1 → 30 min); recording a deploy waits for the database to come back.
    - The reconcile loop; `stop` keeps a project down on purpose.
    - Migration `00004`. No approval step, no Docker event stream (16.5, F16).
-6. **CLI:** the full command set (F7).
-7. **Notifications and self-update:** F4, F9.
-8. **Release:**
+6. **Self-update** (F9, a must for v1.0.0: manual deploys are the most work), with what it needs:
+   - A healthcheck for Lighthouse's own container (F11).
+   - Going back for a project that deploys commits: `deploy <name> <commit>` and `rollback <name>` (F3). The rest of F7 is done; `approve` and `set` were dropped.
+   - The helper container: build the new image, finish the current deploy, swap, wait for healthy, put the old one back if not.
+7. **Release preparation:**
    - CHANGELOG, README, this document.
    - Rollout-plan entries: Admin SQL, Cove keys and tokens, compose changes on the server, `import`, the fixed IP on `spark`.
    - **Revisit S1:** decide whether Cove v1.1.0 (delegated reads, `--from` tokens) is worth doing before or after tagging.
-   - Merge, tag `v1.0.0`.
+8. **Notifications (F4): to revisit.** Lu is thinking it over. The draft (2026-10-07):
+   - A small program of its own on Lu's Windows PC, started at login, with one inbound API (`POST /v1/notify`: title, message, level, source; a bearer token) that shows a Windows notification. Any project could use it, not only Lighthouse.
+   - Lighthouse would notify on: a deploy failed, rolled back or left a project broken; Cove or GitHub unreachable; the reconcile loop bringing a project back; a self-update; the GitHub token close to expiring (F5).
+   - Cove keys `SHARED_NOTIFIER_URL` and `SHARED_NOTIFIER_TOKEN`. The PC needs a fixed LAN address and a firewall rule allowing only the server.
+   - Open: its own repository (recommended) or part of Lighthouse, and its name; whether the PC's address is fixed; when the PC is off, (a) Lighthouse retries for a while and drops (recommended; history keeps everything), or (b) the notifier catches up on wake, which needs something on the server it can reach.
+9. **Tag `v1.0.0`:** merge into `main`, tag, push.
 
 ### 16.9 Compose projects and services (decided 2026-10-06)
 
